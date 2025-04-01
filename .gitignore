@@ -1,0 +1,47 @@
+# Python 관련
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+*.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 환경 설정 및 민감한 정보
+config/settings.py
+
+# 데이터 디렉토리
+data/
+!data/processed/  
+data/backup/
+data/cache/
+data/error/
+data/raw/
+
+# Jupyter Notebook 체크포인트
+.ipynb_checkpoints/
+
+# 테스트 데이터
+test_data/
+!test_data/processed/ 
+test_data/backup/
+test_data/cache/
+test_data/error/
+test_data/raw/
+
+# 로그 파일
+log/
+*.log
+
+# IDE 및 OS 관련 파일
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 기타
+*.bak
+*.tmp
+*.swp
+*.orig
