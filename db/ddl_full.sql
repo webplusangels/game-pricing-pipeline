@@ -1,4 +1,4 @@
--- 데이터베이스 스키마 정의
+-- 데이터베이스 스키마 정의 (개선된 버전)
 
 -- 1. category
 -- DROP TABLE IF EXISTS category CASCADE;
@@ -13,8 +13,8 @@ COMMENT ON COLUMN category.category_name IS '카테고리 이름';
 -- 2. platform
 -- DROP TABLE IF EXISTS platform CASCADE;
 CREATE TABLE platform (
-    id INT PRIMARY KEY,
-    name VARCHAR NOT NULL
+    id BIGINT PRIMARY KEY,  -- INT에서 BIGINT로 변경, 일관성 유지
+    name VARCHAR(255) NOT NULL  -- 길이 제한 추가
 );
 
 COMMENT ON COLUMN platform.id IS '플랫폼 고유 식별자';
@@ -26,14 +26,14 @@ CREATE TABLE game_static (
     id BIGINT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     original_title VARCHAR(255),
-    description TEXT,
+    description TEXT NOT NULL,  -- NOT NULL 추가
     release_date VARCHAR(255),
     publisher VARCHAR(255),
     developer VARCHAR(255),
     thumbnail VARCHAR(255),
-    price INT,
-    is_singleplay BOOLEAN,
-    is_multiplay BOOLEAN
+    price INT NOT NULL,  -- NOT NULL 추가
+    is_singleplay BOOLEAN NOT NULL,  -- NOT NULL 추가
+    is_multiplay BOOLEAN NOT NULL  -- NOT NULL 추가
 );
 
 COMMENT ON COLUMN game_static.id IS '게임 고유 식별자';
@@ -51,15 +51,15 @@ COMMENT ON COLUMN game_static.is_multiplay IS '멀티플레이 여부';
 -- 4. game_dynamic
 -- DROP TABLE IF EXISTS game_dynamic CASCADE;
 CREATE TABLE game_dynamic (
-    game_id BIGINT PRIMARY KEY REFERENCES game_static(id),
-    rating INT,
-    active_players INT,
-    lowest_platform INT REFERENCES platform(id),
-    lowest_price INT,
-    history_lowest_price INT,
-    on_sale BOOLEAN,
-    total_reviews BIGINT,
-    updated_at TIMESTAMP DEFAULT now()
+    game_id BIGINT PRIMARY KEY REFERENCES game_static(id) ON DELETE CASCADE,  -- 삭제 전략 추가
+    rating INT NOT NULL,  -- NOT NULL 추가
+    active_players INT NOT NULL,  -- NOT NULL 추가
+    lowest_platform BIGINT REFERENCES platform(id) ON DELETE SET NULL,  -- INT에서 BIGINT로 변경, 삭제 전략 추가
+    lowest_price INT NOT NULL,  -- NOT NULL 추가
+    history_lowest_price INT NOT NULL,  -- NOT NULL 추가
+    on_sale BOOLEAN NOT NULL,  -- NOT NULL 추가
+    total_reviews BIGINT NOT NULL,  -- NOT NULL 추가
+    updated_at TIMESTAMP DEFAULT now() NOT NULL  -- NOT NULL 추가
 );
 
 COMMENT ON COLUMN game_dynamic.game_id IS '게임 고유 식별자 (game_static 참조)';
@@ -72,6 +72,15 @@ COMMENT ON COLUMN game_dynamic.on_sale IS '할인 여부';
 COMMENT ON COLUMN game_dynamic.total_reviews IS '총 리뷰 수';
 COMMENT ON COLUMN game_dynamic.updated_at IS '업데이트된 날짜';
 
+-- set_updated_at() 함수 정의
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- 트리거: game_dynamic
 CREATE TRIGGER update_game_dynamic_timestamp
 BEFORE UPDATE ON game_dynamic
@@ -81,9 +90,9 @@ EXECUTE FUNCTION set_updated_at();
 -- 5. game_category
 -- DROP TABLE IF EXISTS game_category CASCADE;
 CREATE TABLE game_category (
-    category_id BIGINT REFERENCES category(id),
-    game_id BIGINT REFERENCES game_static(id),
-    PRIMARY KEY (category_id, game_id)
+		id BIGSERIAL PRIMARY KEY,
+    category_id BIGINT REFERENCES category(id) ON DELETE CASCADE,  -- 삭제 전략 추가
+    game_id BIGINT REFERENCES game_static(id) ON DELETE CASCADE,  -- 삭제 전략 추가
 );
 
 COMMENT ON COLUMN game_category.category_id IS '카테고리 ID (category 참조)';
@@ -92,11 +101,11 @@ COMMENT ON COLUMN game_category.game_id IS '게임 ID (game_static 참조)';
 -- 6. current_price_by_platform
 -- DROP TABLE IF EXISTS current_price_by_platform CASCADE;
 CREATE TABLE current_price_by_platform (
-    id SERIAL PRIMARY KEY,
-    game_id INT REFERENCES game_static(id),
-    platform_id INT REFERENCES platform(id),
-    discount_rate INT,
-    discount_price INT,
+    id BIGSERIAL PRIMARY KEY,
+    game_id BIGINT REFERENCES game_static(id) ON DELETE CASCADE,  -- INT에서 BIGINT로 변경, 삭제 전략 추가
+    platform_id BIGINT REFERENCES platform(id) ON DELETE CASCADE,  -- INT에서 BIGINT로 변경, 삭제 전략 추가
+    discount_rate INT NOT NULL,  -- NOT NULL 추가
+    discount_price INT NOT NULL,  -- NOT NULL 추가
     created_at TIMESTAMP DEFAULT now() NOT NULL,
     updated_at TIMESTAMP DEFAULT now() NOT NULL,
     deleted_at TIMESTAMP
@@ -122,11 +131,11 @@ EXECUTE FUNCTION set_updated_at();
 CREATE TABLE users (
     id BIGSERIAL PRIMARY KEY,
     kakao_id VARCHAR(255),
-    nickname VARCHAR(12),
+    nickname VARCHAR(12) NOT NULL,  -- NOT NULL 추가
     discord_link VARCHAR(255),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,  -- NOT NULL 추가
     deleted_at TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL  -- NOT NULL 추가
 );
 
 COMMENT ON COLUMN users.id IS '사용자 고유 식별자';
@@ -140,8 +149,8 @@ COMMENT ON COLUMN users.updated_at IS '사용자 수정 날짜';
 -- 8. user_category
 -- DROP TABLE IF EXISTS user_category CASCADE;
 CREATE TABLE user_category (
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    category_id BIGINT NOT NULL REFERENCES category(id),
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- 삭제 전략 추가
+    category_id BIGINT NOT NULL REFERENCES category(id) ON DELETE CASCADE,  -- 삭제 전략 추가
     PRIMARY KEY (user_id, category_id)
 );
 
@@ -151,9 +160,9 @@ COMMENT ON COLUMN user_category.category_id IS '카테고리 ID (category 참조
 -- 9. comment
 -- DROP TABLE IF EXISTS comment CASCADE;
 CREATE TABLE comment (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    game_id BIGINT NOT NULL REFERENCES game_static(id),
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- 삭제 전략 추가
+    game_id BIGINT NOT NULL REFERENCES game_static(id) ON DELETE CASCADE,  -- 삭제 전략 추가
     content VARCHAR(100) NOT NULL,
     created_at TIMESTAMP DEFAULT now() NOT NULL,
     updated_at TIMESTAMP DEFAULT now() NOT NULL,
@@ -168,11 +177,17 @@ COMMENT ON COLUMN comment.created_at IS '댓글이 생성된 날짜';
 COMMENT ON COLUMN comment.updated_at IS '댓글이 수정된 날짜';
 COMMENT ON COLUMN comment.deleted_at IS '댓글이 삭제된 날짜';
 
+-- 트리거: comment 업데이트 시간
+CREATE TRIGGER update_comment_timestamp
+BEFORE UPDATE ON comment
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
 -- 10. video
 -- DROP TABLE IF EXISTS video CASCADE;
 CREATE TABLE video (
-    id SERIAL PRIMARY KEY,
-    game_id INT NOT NULL REFERENCES game_static(id),
+    id BIGSERIAL PRIMARY KEY,
+    game_id BIGINT NOT NULL REFERENCES game_static(id) ON DELETE CASCADE,  -- INT에서 BIGINT로 변경, 삭제 전략 추가
     video_id VARCHAR(255) NOT NULL,
     title VARCHAR(255) NOT NULL,
     thumbnail TEXT NOT NULL,
@@ -181,7 +196,7 @@ CREATE TABLE video (
     channel_profile_image TEXT NOT NULL,
     channel_name VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT now() NOT NULL,
-    updated_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now() NOT NULL,  -- NOT NULL 추가
     deleted_at TIMESTAMP
 );
 
@@ -197,3 +212,9 @@ COMMENT ON COLUMN video.channel_name IS '관련 영상 업로드 채널 이름';
 COMMENT ON COLUMN video.created_at IS '데이터베이스에 등록된 날짜';
 COMMENT ON COLUMN video.updated_at IS '데이터베이스에서 수정된 최종 날짜';
 COMMENT ON COLUMN video.deleted_at IS '서비스에서 더이상 사용하지 않을 날짜';
+
+-- 트리거: video 업데이트 시간
+CREATE TRIGGER update_video_timestamp
+BEFORE UPDATE ON video
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
