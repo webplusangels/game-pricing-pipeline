@@ -1,13 +1,13 @@
 from util.io_helper import load_csv, save_csv
 from config import settings
 
-def filter_by_common_ids(games_df, common_ids_path):
+def filter_common_ids_by_games(games_df, common_ids_path):
     """
     공통 ID 기준으로 게임 필터링
     """
     common_id_df = load_csv(common_ids_path)
-    filtered_games_df = games_df[games_df['appid'].isin(common_id_df['appid'])]
-    return filtered_games_df
+    filtered_common_id_df = common_id_df[common_id_df['appid'].isin(games_df['appid'])]
+    return filtered_common_id_df
 
 def split_free_and_paid(games_df):
     """
@@ -28,10 +28,10 @@ def filter_games(games_list_path):
     games_df = games_df[games_df['appid'].notna()]
     
     # 공통 ID 기준으로 필터링
-    games_df = filter_by_common_ids(games_df, settings.LIST_DIR)
+    common_id_df = filter_common_ids_by_games(games_df, settings.LIST_DIR)
     
     # 필터링된 게임 리스트 저장
-    save_csv(games_df, games_list_path)
+    save_csv(common_id_df, settings.LIST_DIR)
     
     # 무료 및 유료 게임 분리
     free_games_df, paid_games_df = split_free_and_paid(games_df)
