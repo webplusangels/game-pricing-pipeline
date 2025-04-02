@@ -10,7 +10,7 @@ from requests.exceptions import HTTPError, Timeout, ConnectionError
 
 from util.io_helper import load_json, save_json, save_csv  
 from util.logger import setup_logger
-from util.retry import retry_on_exception
+from util.rate_limit_manager import RateLimitManager
 
 class SteamDetailFetcher:
     def __init__(self, 
@@ -37,6 +37,9 @@ class SteamDetailFetcher:
             name="steam_detail_fetcher", 
             log_dir=self.LOG_DIR,
         )
+        
+        # 요청 제어기 설정
+        self.rate_limit_manager = RateLimitManager()
         
         # 파일 경로 설정
         self.CACHE_FILE = self.CACHE_DIR / "detail_status_cache.json"
@@ -158,6 +161,7 @@ class SteamDetailFetcher:
             
             if status_code == 429:  # Rate limit
                 self.logger.warning(f"[{app_id}] 요청 제한 감지")
+                self.rate_limit_manager.handle_rate_limit(app_id)
             raise
                 
         except Exception as e:
@@ -215,16 +219,23 @@ class SteamDetailFetcher:
     
     def fetch_in_parallel(self, app_ids, batch_size=40):
         """배치 단위로 병렬 처리"""
+        base_delay = 0.8
+        
         for i in range(0, len(app_ids), batch_size):
             batch = app_ids[i:i+batch_size]
             self.logger.info(f"배치 처리 중: {i+1}-{i+len(batch)}/{len(app_ids)}")
+            
+            # 요청 제한 상황에 따라 지연 시간 조정
+            request_delay = self.rate_limit_manager.get_current_delay(base_delay)
+            if self.rate_limit_manager.should_slow_down():
+                self.logger.info(f"⚠️ 요청 제한 감지로 지연 시간 증가: {request_delay:.2f}초")
             
             with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
                 # 요청 제출 시 약간의 지연 추가
                 futures = []
                 for app_id in batch:
                     futures.append(executor.submit(self.fetch_detail_data, app_id))
-                    time.sleep(0.8)  # 요청 간 800ms 지연
+                    time.sleep(request_delay)  # 요청 간 800ms 지연
                 
                 for future in tqdm(as_completed(futures), total=len(batch), desc="📦 Fetching"):
                     try:
@@ -334,6 +345,3 @@ class SteamDetailFetcher:
             })
             failed_df.to_csv(self.ERROR_DIR / "failed_detail_ids.csv", index=False)
             self.logger.info(f"❗ 실패한 ID 목록이 failed_detail_ids.csv에 저장되었습니다.")
-            
-# 리스트 업데이트 필요
-# common_ids.csv
