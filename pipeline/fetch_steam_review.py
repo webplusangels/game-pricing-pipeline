@@ -86,7 +86,8 @@ class SteamReviewFetcher:
         if app_id in self.status_cache and self.status_cache[app_id] == "success":
             return
         
-        url = f"http://store.steampowered.com/appreviews/{app_id}?json=1"
+        url = f"https://store.steampowered.com/appreviews/{app_id}?json=1&filter=all&language=all&day_range=all&review_type=all&purchase_type=all"
+        
         try:
             response = requests.get(url, headers=self.HEADERS, timeout=10)
             response.raise_for_status()
