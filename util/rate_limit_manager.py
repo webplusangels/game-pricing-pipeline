@@ -3,7 +3,7 @@ import time
 import logging
 
 class RateLimitManager:
-    def __init__(self, window_seconds=60, threshold=5, initial_backoff=5, max_backoff=300):
+    def __init__(self, window_seconds=60, threshold=5, initial_backoff=5, max_backoff=150):
         self.window_seconds = window_seconds  # 측정 윈도우(초)
         self.threshold = threshold  # 임계값
         self.initial_backoff = initial_backoff  # 초기 백오프 시간(초)
@@ -36,7 +36,7 @@ class RateLimitManager:
         count = len(self.timestamps)
         if count == 0:
             return base_delay
-        return min(base_delay * (1 + count * 0.5), 5.0)  # 최대 5초
+        return min(base_delay + count * 0.3, 3.0)  # 최대 5초
         
     def handle_rate_limit(self, app_id=None):
         """요청 제한 발생 시 처리 및 대기"""
