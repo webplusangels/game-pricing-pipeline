@@ -37,5 +37,5 @@ def filter_games(games_list_path):
     free_games_df, paid_games_df = split_free_and_paid(games_df)
     
     # 무료 및 유료 게임 저장
-    save_csv(free_games_df, "./data/raw/free_steam_list.csv")
-    save_csv(paid_games_df, "./data/raw/paid_steam_list.csv")
+    save_csv(paid_games_df, settings.PAID_LIST_DIR)
+    save_csv(free_games_df, settings.FREE_LIST_DIR)
