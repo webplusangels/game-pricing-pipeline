@@ -1,7 +1,7 @@
 -- 데이터베이스 스키마 정의 (개선된 버전)
 
 -- 1. category
--- DROP TABLE IF EXISTS category CASCADE;
+DROP TABLE IF EXISTS category CASCADE;
 CREATE TABLE category (
     id BIGINT PRIMARY KEY,
     category_name VARCHAR(100) NOT NULL
@@ -11,7 +11,7 @@ COMMENT ON COLUMN category.id IS '카테고리 고유 식별자';
 COMMENT ON COLUMN category.category_name IS '카테고리 이름';
 
 -- 2. platform
--- DROP TABLE IF EXISTS platform CASCADE;
+DROP TABLE IF EXISTS platform CASCADE;
 CREATE TABLE platform (
     id BIGINT PRIMARY KEY,  -- INT에서 BIGINT로 변경, 일관성 유지
     name VARCHAR(255) NOT NULL  -- 길이 제한 추가
@@ -21,7 +21,7 @@ COMMENT ON COLUMN platform.id IS '플랫폼 고유 식별자';
 COMMENT ON COLUMN platform.name IS '플랫폼 이름';
 
 -- 3. game_static
--- DROP TABLE IF EXISTS game_static CASCADE;
+DROP TABLE IF EXISTS game_static CASCADE;
 CREATE TABLE game_static (
     id BIGINT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
@@ -49,7 +49,7 @@ COMMENT ON COLUMN game_static.is_singleplay IS '싱글플레이 여부';
 COMMENT ON COLUMN game_static.is_multiplay IS '멀티플레이 여부';
 
 -- 4. game_dynamic
--- DROP TABLE IF EXISTS game_dynamic CASCADE;
+DROP TABLE IF EXISTS game_dynamic CASCADE;
 CREATE TABLE game_dynamic (
     game_id BIGINT PRIMARY KEY REFERENCES game_static(id) ON DELETE CASCADE,  -- 삭제 전략 추가
     rating INT NOT NULL,  -- NOT NULL 추가
@@ -88,7 +88,7 @@ FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
 -- 5. game_category
--- DROP TABLE IF EXISTS game_category CASCADE;
+DROP TABLE IF EXISTS game_category CASCADE;
 CREATE TABLE game_category (
 		id BIGSERIAL PRIMARY KEY,
     category_id BIGINT REFERENCES category(id) ON DELETE CASCADE,  -- 삭제 전략 추가
@@ -99,7 +99,7 @@ COMMENT ON COLUMN game_category.category_id IS '카테고리 ID (category 참조
 COMMENT ON COLUMN game_category.game_id IS '게임 ID (game_static 참조)';
 
 -- 6. current_price_by_platform
--- DROP TABLE IF EXISTS current_price_by_platform CASCADE;
+DROP TABLE IF EXISTS current_price_by_platform CASCADE;
 CREATE TABLE current_price_by_platform (
     game_id BIGINT NOT NULL REFERENCES game_static(id) ON DELETE CASCADE,
     platform_id BIGINT NOT NULL REFERENCES platform(id) ON DELETE CASCADE,
@@ -118,7 +118,7 @@ COMMENT ON COLUMN current_price_by_platform.url IS '게임 상세 페이지 URL'
 COMMENT ON COLUMN current_price_by_platform.created_at IS '데이터 생성 시각';
 
 -- 7. users
--- DROP TABLE IF EXISTS users CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
 CREATE TABLE users (
     id BIGSERIAL PRIMARY KEY,
     kakao_id VARCHAR(255),
@@ -138,7 +138,7 @@ COMMENT ON COLUMN users.deleted_at IS '사용자 삭제 날짜';
 COMMENT ON COLUMN users.updated_at IS '사용자 수정 날짜';
 
 -- 8. user_category
--- DROP TABLE IF EXISTS user_category CASCADE;
+DROP TABLE IF EXISTS user_category CASCADE;
 CREATE TABLE user_category (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- 삭제 전략 추가
     category_id BIGINT NOT NULL REFERENCES category(id) ON DELETE CASCADE,  -- 삭제 전략 추가
@@ -149,7 +149,7 @@ COMMENT ON COLUMN user_category.user_id IS '사용자 ID (users 참조)';
 COMMENT ON COLUMN user_category.category_id IS '카테고리 ID (category 참조)';
 
 -- 9. comment
--- DROP TABLE IF EXISTS comment CASCADE;
+DROP TABLE IF EXISTS comment CASCADE;
 CREATE TABLE comment (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- 삭제 전략 추가
@@ -175,7 +175,7 @@ FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
 -- 10. video
--- DROP TABLE IF EXISTS video CASCADE;
+DROP TABLE IF EXISTS video CASCADE;
 CREATE TABLE video (
     id BIGSERIAL PRIMARY KEY,
     game_id BIGINT NOT NULL REFERENCES game_static(id) ON DELETE CASCADE,  -- INT에서 BIGINT로 변경, 삭제 전략 추가
