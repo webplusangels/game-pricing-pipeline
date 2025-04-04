@@ -219,7 +219,7 @@ class SteamDetailFetcher:
     
     def fetch_in_parallel(self, app_ids, batch_size=40):
         """배치 단위로 병렬 처리"""
-        base_delay = 0.8
+        base_delay = 1
         
         for i in range(0, len(app_ids), batch_size):
             batch = app_ids[i:i+batch_size]
