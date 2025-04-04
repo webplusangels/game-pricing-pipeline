@@ -9,7 +9,6 @@ from requests.exceptions import HTTPError, Timeout, ConnectionError
 
 from util.io_helper import load_json, save_json, save_csv  
 from util.logger import setup_logger
-from util.retry import retry_on_exception
 
 class SteamActivePlayerFetcher:
     def __init__(self, 
@@ -78,9 +77,6 @@ class SteamActivePlayerFetcher:
             self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
             return {}
         
-    @retry_on_exception(max_retries=2, 
-                    exceptions=(Timeout, ConnectionError, HTTPError), 
-                    logger=None)
     def fetch_active_player_data(self, app_id):
         """Steam API에서 활성 플레이어 데이터 가져오기"""
         if str(app_id) in self.status_cache and self.status_cache[str(app_id)] == "success":
