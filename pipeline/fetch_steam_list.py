@@ -10,7 +10,6 @@ from requests.exceptions import HTTPError, Timeout, ConnectionError
 
 from util.io_helper import load_json, save_json, save_csv
 from util.logger import setup_logger
-from util.retry import retry_on_exception
 from config import settings
 
 class SteamListFetcher:
@@ -86,9 +85,6 @@ class SteamListFetcher:
             self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
             return {}
     
-    @retry_on_exception(max_retries=2, 
-                    exceptions=(Timeout, ConnectionError, HTTPError), 
-                    logger=None)
     def scrape_steamcharts_page(self, page_number):
         """단일 SteamCharts 페이지 스크래핑"""
         if str(page_number) in self.status_cache and self.status_cache[str(page_number)] == "success":
