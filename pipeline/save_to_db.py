@@ -19,6 +19,8 @@ class DBUploader:
             df = load_csv(file_path)
             self.delete_rows(table, df)
             print(f"🗑️ {table} 삭제 완료")
+            if file_path.exists():
+                os.remove(file_path)
             
         for file_path in self.data_dir.glob("*_updated.csv"):
             table = file_path.stem.replace("_updated", "")
