@@ -322,5 +322,10 @@ class DataProcessor:
         self.save_if_changed(unique_platform_df, "platform.csv")
 
     def run(self):
+        keep_filenames = set(f"{name}.csv" for name in self.table_parsers)
+        for file in self.data_processed_dir.glob("*.csv"):
+            if file.name not in keep_filenames:
+                os.remove(file)
+        
         for table_name, parse_fn in self.table_parsers.items():
             parse_fn()
