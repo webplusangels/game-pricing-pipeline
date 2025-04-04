@@ -233,9 +233,9 @@ class SteamDetailFetcher:
             with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
                 # 요청 제출 시 약간의 지연 추가
                 futures = []
+                time.sleep(request_delay)  # 요청 간 800ms 지연
                 for app_id in batch:
                     futures.append(executor.submit(self.fetch_detail_data, app_id))
-                    time.sleep(request_delay)  # 요청 간 800ms 지연
                 
                 for future in tqdm(as_completed(futures), total=len(batch), desc="📦 Fetching"):
                     try:
