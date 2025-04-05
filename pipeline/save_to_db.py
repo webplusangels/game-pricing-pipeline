@@ -32,7 +32,7 @@ class DBUploader:
                 "game_static": ["id"],
                 "game_dynamic": ["game_id"],
                 "game_category": ["id"],
-                "current_price_by_platform": ["id"]
+                "current_price_by_platform": ["game_id", "platform_id"]
             }
 
             self.insert_or_update_data(table, df, file_path, index_columns_map[table])
@@ -47,7 +47,7 @@ class DBUploader:
             "game_static": ["id"],
             "game_dynamic": ["game_id"],
             "game_category": ["id"],
-            "current_price_by_platform": ["id"]
+            "current_price_by_platform": ["game_id", "platform_id"]
         }
 
         index_columns = index_columns_map.get(table_name)
