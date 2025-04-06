@@ -25,7 +25,7 @@ class DataProcessor:
         self.itad_id_df = load_csv(self.data_raw_dir / 'itad_game_ids.csv')
         self.review_df = load_csv(self.data_raw_dir / 'steam_game_reviews.csv')
         self.active_player_df = load_csv(self.data_raw_dir / 'steam_game_active_player.csv')
-        self.original_title_df = load_csv(self.data_raw_dir / 'common_ids.csv')
+        self.original_title_df = load_csv(self.data_raw_dir / 'all_app_list.csv')
 
         self.table_parsers = {
             "category": self.parse_category,
@@ -272,7 +272,6 @@ class DataProcessor:
         steam_games['url'] = steam_games['appid'].apply(lambda x: f'https://store.steampowered.com/app/{x}/')
         steam_games = steam_games.rename(columns={'appid': 'game_id', 'initial_price': 'discount_price'})
         current_price_df = pd.concat([current_price_df, steam_games], ignore_index=True)   
-        current_price_df.insert(0, 'id', range(1, len(current_price_df) + 1))
         
         current_price_df = current_price_df.astype({
             'game_id': int,

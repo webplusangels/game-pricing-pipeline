@@ -1,0 +1,40 @@
+# .env를 읽고 상수로 정리하는 모듈
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 기본값 설정 (예시)
+DEFAULT_STEAM_KEY = 'default_steam_key'
+DEFAULT_STEAM_TOKEN = 'default_webapi_token'
+DEFAULT_ITAD_KEY = 'default_itad_key'
+
+DEFAULT_DB_HOST = 'localhost'
+DEFAULT_DB_NAME = 'default_db_name'
+DEFAULT_DB_USER = 'default_db_user'
+DEFAULT_DB_PASS = 'default_db_pass'
+DEFAULT_DB_PORT = '5432'
+
+DEFAULT_LIST_DIR = './data/raw/common_ids.csv'
+DEFAULT_PAID_LIST_DIR = './data/raw/paid_steam_list.csv'
+DEFAULT_FREE_LIST_DIR = './data/raw/free_steam_list.csv'
+
+# .env 파일에서 환경변수를 읽어옵니다.
+# 환경변수를 읽어오지 못하면 기본값을 사용합니다.
+STEAM_KEY = os.getenv('steam_api_key', DEFAULT_STEAM_KEY)
+STEAM_TOKEN = os.getenv('webapi_token', DEFAULT_STEAM_TOKEN)
+ITAD_KEY = os.getenv('itad_key', DEFAULT_ITAD_KEY)
+
+DB_HOST = os.getenv('db_host', DEFAULT_DB_HOST)
+DB_NAME = os.getenv('db_name', DEFAULT_DB_NAME)
+DB_USER = os.getenv('db_user', DEFAULT_DB_USER)
+DB_PASS = os.getenv('db_pass', DEFAULT_DB_PASS)
+DB_PORT = os.getenv('db_port', DEFAULT_DB_PORT)
+
+DB_URL = f"postgresql://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# 디렉토리 설정
+LIST_DIR = os.getenv('list_dir', DEFAULT_LIST_DIR)
+PAID_LIST_DIR = os.getenv('paid_list_dir', DEFAULT_PAID_LIST_DIR)
+FREE_LIST_DIR = os.getenv('free_list_dir', DEFAULT_FREE_LIST_DIR)

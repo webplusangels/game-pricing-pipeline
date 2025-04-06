@@ -8,15 +8,17 @@ from util.io_helper import load_csv
 
 class DBUploader:
     def __init__(self):
-        self.engine = create_engine(
-            f"postgresql://{settings.DB_USER}:{settings.DB_PASS}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
-        )
+        self.engine = create_engine(settings.DB_URL)
         self.data_dir = Path("data/processed")
 
-    def run(self):
+    def run(self, dry_run=False):
         for file_path in self.data_dir.glob("*_removed.csv"):
             table = file_path.stem.replace("_removed", "")
             df = load_csv(file_path)
+            if dry_run:
+                print(f"[Dry Run] {table}에서 {len(df)}개 행이 삭제될 예정입니다.")
+                continue
+            
             self.delete_rows(table, df)
             print(f"🗑️ {table} 삭제 완료")
             if file_path.exists():
@@ -26,13 +28,17 @@ class DBUploader:
             table = file_path.stem.replace("_updated", "")
             df = load_csv(file_path)
 
+            if dry_run:
+                print(f"[Dry Run] {table}에 {len(df)}개 행이 업로드(또는 수정)될 예정입니다.")
+                continue
+            
             index_columns_map = {
                 "category": ["id"],
                 "platform": ["id"],
                 "game_static": ["id"],
                 "game_dynamic": ["game_id"],
                 "game_category": ["id"],
-                "current_price_by_platform": ["id"]
+                "current_price_by_platform": ["game_id", "platform_id"]
             }
 
             self.insert_or_update_data(table, df, file_path, index_columns_map[table])
@@ -47,7 +53,7 @@ class DBUploader:
             "game_static": ["id"],
             "game_dynamic": ["game_id"],
             "game_category": ["id"],
-            "current_price_by_platform": ["id"]
+            "current_price_by_platform": ["game_id", "platform_id"]
         }
 
         index_columns = index_columns_map.get(table_name)
@@ -61,7 +67,7 @@ class DBUploader:
         with self.engine.begin() as conn:
             for _, row in df.iterrows():
                 condition = and_(*[
-                    getattr(table.c, col) == row[col]
+                    getattr(table.c, col) == int(row[col])
                     for col in index_columns
                 ])
                 conn.execute(table.delete().where(condition))
@@ -88,3 +94,4 @@ class DBUploader:
 
         if file_path.exists():
             os.remove(file_path)
+            

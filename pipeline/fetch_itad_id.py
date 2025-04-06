@@ -8,7 +8,8 @@ from requests.exceptions import HTTPError, Timeout, ConnectionError
 from datetime import datetime
 from config import settings
 
-from util.io_helper import load_json, save_json, save_csv  
+from util.io_helper import save_csv, load_csv
+from util.cache_manager import CacheManager
 from util.logger import setup_logger
 from util.rate_limit_manager import RateLimitManager
 
@@ -59,62 +60,37 @@ class ITADIdFetcher:
         self.fetched_data = []
         self.failed_list = []
         self.errored_list = []
-        self.status_cache = self._load_cache()
-    
-    def _load_cache(self):
-        """캐시 파일에서 상태 정보 로드"""
-        try:
-            cache = load_json(self.CACHE_FILE)
-            if not isinstance(cache, dict):
-                self.logger.warning("⚠️ 캐시 파일이 비정상적입니다. 빈 캐시로 초기화합니다.")
-                return {}
-            
-            # 중복 키 제거 (마지막 값 유지)
-            deduplicated_cache = {}
-            for key, value in cache.items():
-                deduplicated_cache[key] = value
-            
-            # 로깅 추가: 중복 제거된 키의 수 확인
-            original_count = len(cache)
-            deduplicated_count = len(deduplicated_cache)
-            
-            if original_count != deduplicated_count:
-                self.logger.info(f"🔍 캐시에서 {original_count - deduplicated_count}개의 중복 키가 제거되었습니다.")
-            
-            return deduplicated_cache
-            
-        except Exception as e:
-            self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
-            return {}
+        self.cache = CacheManager(self.CACHE_FILE)
         
     def fetch_game_info(self, row):
-        """ITAD API에서 게임 정보 가져오기"""
+        """ITAD API에서 게임 ID 가져오기"""
         app_id = row['appid']
         name = row.get('name', 'Unknown')
+        cached = self.cache.get(app_id)
         
-        if str(app_id) in self.status_cache and self.status_cache[str(app_id)] == "success":
-            self.logger.info(f"[{app_id}] 이미 수집된 데이터, 건너뜀")
+        if cached and cached.get("status") == "success":
+            return
+        if self.cache.too_many_fails(app_id):
+            self.logger.info(f"🚫 앱 {app_id}은 실패가 누적되어 건너뜁니다.")
             return
             
         url = f"{self.ID_BASE_URL}?key={self.KEY}&appid={app_id}"
+        
         try:
             response = requests.get(url, headers=self.HEADERS, timeout=10)
             response.raise_for_status()
             data = response.json()
             
-            # 응답 데이터 디버그 로깅
-            self.logger.debug(f"[{app_id}] 응답 데이터: {data}")
-            
             # 응답 데이터 확인
             if data is None:
                 self.failed_list.append(app_id)
-                self.status_cache[str(app_id)] = "failed_empty_response"
+                self.cache.record_fail(app_id)
                 self.logger.warning(f"[{app_id}] 빈 응답")
                 return
                 
             if "found" not in data:
                 self.failed_list.append(app_id)
-                self.status_cache[str(app_id)] = "failed_no_found_key"
+                self.cache.record_fail(app_id)
                 self.logger.warning(f"[{app_id}] 'found' 키가 없음: {data}")
                 return
                 
@@ -129,7 +105,9 @@ class ITADIdFetcher:
                 }
                 
                 self.fetched_data.append(processed_data)
-                self.status_cache[str(app_id)] = "success"
+                self.cache.set(app_id, {
+                    "status": "success",
+                })
                 self.logger.info(f"[{app_id}] 성공적으로 ITAD ID 찾음: {itad_id}")
             else:
                 # found가 False인 경우 또는 game/id 키가 없는 경우
@@ -141,25 +119,25 @@ class ITADIdFetcher:
                 }
                 
                 self.fetched_data.append(processed_data)
-                self.status_cache[str(app_id)] = "not_found"
+                self.cache.record_fail(app_id)
                 self.logger.info(f"[{app_id}] 게임을 ITAD에서 찾을 수 없음")
                 
         except Timeout:
             self.errored_list.append(app_id)
-            self.status_cache[str(app_id)] = "timeout"
+            self.cache.record_fail(app_id)
             self.logger.warning(f"[{app_id}] 요청 타임아웃")
             raise
             
         except ConnectionError as e:
             self.errored_list.append(app_id)
-            self.status_cache[str(app_id)] = "connection_error"
+            self.cache.record_fail(app_id)
             self.logger.error(f"[{app_id}] 연결 오류: {e}")
             raise
             
         except HTTPError as e:
             self.errored_list.append(app_id)
             status_code = getattr(e.response, 'status_code', None)
-            self.status_cache[str(app_id)] = f"http_error_{status_code}"
+            self.cache.set(app_id, f"http_error_{status_code}")
             
             if status_code == 429:  # Rate limit
                 self.logger.warning(f"[{app_id}] 요청 제한 감지")
@@ -168,33 +146,27 @@ class ITADIdFetcher:
                 
         except Exception as e:
             self.errored_list.append(app_id)
-            self.status_cache[str(app_id)] = "error"
+            self.cache.record_fail(app_id)
             self.logger.error(f"[{app_id}] 에러 발생: {str(e)}")
             raise
     
     def save_checkpoint(self):
         """현재 수집 상태 저장"""
         try:
-            # 새 데이터를 DataFrame으로 변환
-            if self.fetched_data:
-                new_data_df = pd.DataFrame(self.fetched_data)
-                
-                # 기존 CSV 로드 및 병합
-                if self.data_df_path.exists():
-                    old_data_df = pd.read_csv(self.data_df_path)
-                    merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
-                    merged_df.drop_duplicates(subset="appid", inplace=True)
-                    save_csv(merged_df, self.data_df_path)
-                else:
-                    save_csv(new_data_df, self.data_df_path)
+            # id 데이터 저장
+            new_data_df = pd.DataFrame(self.fetched_data)
             
-            # 상태 캐시의 중복 제거
-            clean_status_cache = {}
-            for key, value in self.status_cache.items():
-                clean_status_cache[key] = value
-                
-            # 캐시 저장
-            save_json(self.CACHE_FILE, clean_status_cache)
+            # 기존 CSV 로드 및 병합
+            if self.data_df_path.exists():
+                old_data_df = load_csv(self.data_df_path)
+                merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
+                merged_df.drop_duplicates(subset="appid", inplace=True)
+            else:
+                merged_df = new_data_df
+            
+            # 저장
+            save_csv(merged_df, self.data_df_path)
+            self.cache.save()
             
             # 진행 상황 출력
             total = len(self.fetched_data) + len(self.failed_list) + len(self.errored_list)
@@ -203,17 +175,13 @@ class ITADIdFetcher:
             # 총 수집된 데이터 수 확인
             total_collected = 0
             if self.data_df_path.exists():
-                total_collected = len(pd.read_csv(self.data_df_path))
-                
-            print(f"💾 중간 저장 완료 - 누적 수집: {total_collected}개")
-            print(f"진행 상황: {len(self.fetched_data)}개 성공 / {len(self.failed_list)}개 실패 / {len(self.errored_list)}개 오류 (성공률: {success_rate:.1f}%)")
-            
+                total_collected = len(load_csv(self.data_df_path))
+                  
             # 저장 후 데이터 초기화 (메모리 관리)
             self.fetched_data = []
             
         except Exception as e:
             self.logger.error(f"체크포인트 저장 중 오류: {e}")
-            print(f"❌ 체크포인트 저장 중 오류: {e}")
     
     def fetch_in_parallel(self, rows, batch_size=40):
         """배치 단위로 병렬 처리"""
@@ -222,7 +190,6 @@ class ITADIdFetcher:
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i+batch_size]
             self.logger.info(f"배치 처리 중: {i+1}-{i+len(batch)}/{len(rows)}")
-            print(f"배치 처리 중: {i+1}-{i+len(batch)}/{len(rows)}")
             
             # 요청 제한 상황에 따라 지연 시간 조정
             request_delay = self.rate_limit_manager.get_current_delay(base_delay)
@@ -252,7 +219,6 @@ class ITADIdFetcher:
                 break
                 
             self.logger.info(f"🔁 {label} 재시도 {i+1}회 - 대상 {len(target_list)}개")
-            print(f"🔁 {label} 재시도 {i+1}회...")
             
             retry_targets = list(set(target_list.copy()))
             target_list.clear()
@@ -269,18 +235,17 @@ class ITADIdFetcher:
         collected_appids = set()
         if self.data_df_path.exists():
             try:
-                existing_df = pd.read_csv(self.data_df_path)
+                existing_df = load_csv(self.data_df_path)
                 collected_appids.update(existing_df["appid"].tolist())
             except Exception as e:
                 self.logger.warning(f"⚠️ 기존 CSV 로드 실패: {e}")
-                print(f"⚠️ 기존 CSV 로드 실패: {e}")
         return collected_appids
     
     def run(self, input_csv_path, id_column="appid"):
         """전체 데이터 수집 프로세스 실행"""
         try:
             # 입력 데이터에서 ID 목록 로드
-            df_input = pd.read_csv(input_csv_path)
+            df_input = load_csv(input_csv_path)
             
             # 필수 칼럼 확인
             if id_column not in df_input.columns:
@@ -297,34 +262,23 @@ class ITADIdFetcher:
             # 이미 수집된 ID 제외
             collected_ids = self.get_collected_appids()
             df_to_collect = df_input[~df_input['appid'].isin(collected_ids)]
+
+            # 수집 대상 appid 리스트 추출
+            rows_to_collect = df_to_collect.to_dict("records")
             
-            # 이미 상태 캐시에 있는 성공한 ID 제외
-            success_ids = [k for k, v in self.status_cache.items() if v == "success"]
-            df_to_collect = df_to_collect[~df_to_collect['appid'].astype(str).isin(success_ids)]
-            
-            rows_to_collect = df_to_collect.to_dict('records')
-            
-            self.logger.info(f"📋 총 {len(df_input)}개 게임 중 {len(rows_to_collect)}개 게임 수집 예정")
-            print(f"📋 총 {len(df_input)}개 게임 중 {len(rows_to_collect)}개 게임 수집 예정")
-            
-            if not rows_to_collect:
-                self.logger.info("모든 게임이 이미 수집되었습니다.")
-                print("모든 게임이 이미 수집되었습니다.")
-                return
-                
             # 1차 수집
             self.fetch_in_parallel(rows_to_collect)
             
             # 실패한 ID 가져오기
             failed_ids_from_cache = [
-                int(app_id) for app_id, status in self.status_cache.items()
-                if isinstance(status, str) and "failed" in status
+                int(app_id) for app_id, status in self.cache.items()
+                if status == "failed"
             ]
             self.logger.info(f"캐시에서 실패한 ID 수: {len(failed_ids_from_cache)}")
     
             # 실패한 ID 파일에서 추가 실패 ID 가져오기
             if self.FAILED_IDS_FILE.exists():
-                failed_ids_from_file = pd.read_csv(self.FAILED_IDS_FILE)["appid"].tolist()
+                failed_ids_from_file = load_csv(self.FAILED_IDS_FILE)["appid"].tolist()
             else:
                 failed_ids_from_file = []
             self.logger.info(f"파일에서 실패한 ID 수: {len(failed_ids_from_file)}")
@@ -332,13 +286,18 @@ class ITADIdFetcher:
             # 실패한 ID 합치기 (중복 제거)
             retry_ids = set(failed_ids_from_cache + failed_ids_from_file)
             
+            # 이미 성공한 ID는 제외
+            retry_ids = [appid for appid in retry_ids if self.cache.get(appid) != "success"]
+            retry_ids = list(set(retry_ids))
+            self.logger.info(f"재시도할 ID 수: {len(retry_ids)}")
+                
             # 재시도 루프
             retry_stages = [
                 {"label": "에러", "targets": self.errored_list, "max_retries": 3},
                 {"label": "실패", "targets": self.failed_list, "max_retries": 2},
                 {"label": "최종 에러", "targets": self.errored_list, "max_retries": 1},
                 {"label": "최종 실패", "targets": self.failed_list, "max_retries": 1},
-                {"label": "마지막", "targets": list(retry_ids), "max_retries": 1}
+                {"label": "마지막", "targets": retry_ids, "max_retries": 1}
             ]
             
             for stage in retry_stages:
@@ -354,19 +313,15 @@ class ITADIdFetcher:
             
             # 최종 결과 출력
             self.logger.info("\n✅ 데이터 수집 완료")
-            print("\n✅ 데이터 수집 완료")
             
             # 총 수집 결과 확인
             if self.data_df_path.exists():
-                final_df = pd.read_csv(self.data_df_path)
+                final_df = load_csv(self.data_df_path)
                 found_count = final_df['itad_id'].notna().sum()
                 self.logger.info(f"🎯 총 수집된 게임 수: {len(final_df)}")
                 self.logger.info(f"🔍 ITAD에서 찾은 게임 수: {found_count} (전체 중 {found_count/len(final_df)*100:.1f}%)")
-                print(f"🎯 총 수집된 게임 수: {len(final_df)}")
-                print(f"🔍 ITAD에서 찾은 게임 수: {found_count} (전체 중 {found_count/len(final_df)*100:.1f}%)")
             
             self.logger.info(f"❌ 최종 실패: {len(self.failed_list)}개, 에러: {len(self.errored_list)}개")
-            print(f"❌ 최종 실패: {len(self.failed_list)}개, 에러: {len(self.errored_list)}개")
             
             # 실패한 ID 목록 저장
             if self.failed_list or self.errored_list:
@@ -376,11 +331,9 @@ class ITADIdFetcher:
                 })
                 save_csv(failed_df, self.ERROR_DIR / "itad_failed_ids.csv")
                 self.logger.info(f"❗ 실패한 ID 목록이 itad_failed_ids.csv에 저장되었습니다.")
-                print(f"❗ 실패한 ID 목록이 itad_failed_ids.csv에 저장되었습니다.")
                 
         except Exception as e:
             self.logger.error(f"프로세스 실행 중 오류: {e}")
-            print(f"❌ 오류 발생: {e}")
 
 # # 사용 예시
 # if __name__ == "__main__":

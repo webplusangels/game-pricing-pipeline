@@ -8,9 +8,9 @@ from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 
-from util.io_helper import load_json, save_json, save_csv
+from util.io_helper import save_csv
+from util.cache_manager import CacheManager
 from util.logger import setup_logger
-from util.retry import retry_on_exception
 from config import settings
 
 class SteamListFetcher:
@@ -21,7 +21,7 @@ class SteamListFetcher:
                  log_dir='./log/fetcher',
                  max_retries=3, 
                  thread_workers=2,
-                 steamcharts_games=5000,
+                 steamcharts_games=1000,
                  webapi_key=settings.STEAM_KEY):
         # ------------------------- 설정 -------------------------
         self.MAX_RETRIES = max_retries
@@ -46,7 +46,8 @@ class SteamListFetcher:
         )
         
         # 파일 경로 설정
-        self.CACHE_FILE = self.CACHE_DIR / "steamcharts_status_cache.json"
+        self.CACHE_FILE_STEAMCHART = self.CACHE_DIR / "steamcharts_status_cache.json"
+        self.CACHE_FILE_ALL_APPS = self.CACHE_DIR / "all_apps_cache.json"
         self.FAILED_PAGES_FILE = self.ERROR_DIR / "failed_steamcharts_pages.csv"
         self.steamcharts_path = self.OUTPUT_DIR / "steamcharts_top_games.csv"
         self.all_apps_path = self.OUTPUT_DIR / "all_app_list.csv"
@@ -60,38 +61,12 @@ class SteamListFetcher:
         # ------------------------- 데이터 저장소 -------------------------
         self.game_data = []
         self.failed_pages = []
-        self.status_cache = self._load_cache()
-        
-    def _load_cache(self):
-        """캐시 파일에서 상태 정보 로드"""
-        try:
-            cache = load_json(self.CACHE_FILE)
-            if not isinstance(cache, dict):
-                self.logger.warning("⚠️ 캐시 파일이 비정상적입니다. 빈 캐시로 초기화합니다.")
-                return {}
-            
-            # 중복 키 제거 (마지막 값 유지)
-            deduplicated_cache = {key: value for key, value in cache.items()}
-            
-            # 로깅 추가: 중복 제거된 키의 수 확인
-            original_count = len(cache)
-            deduplicated_count = len(deduplicated_cache)
-            
-            if original_count != deduplicated_count:
-                self.logger.info(f"🔍 캐시에서 {original_count - deduplicated_count}개의 중복 키가 제거되었습니다.")
-            
-            return deduplicated_cache
-        
-        except Exception as e:
-            self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
-            return {}
+        self.cache_steamchart = CacheManager(self.CACHE_FILE_STEAMCHART)
+        self.cache_all_apps = CacheManager(self.CACHE_FILE_ALL_APPS)
     
-    @retry_on_exception(max_retries=2, 
-                    exceptions=(Timeout, ConnectionError, HTTPError), 
-                    logger=None)
     def scrape_steamcharts_page(self, page_number):
         """단일 SteamCharts 페이지 스크래핑"""
-        if str(page_number) in self.status_cache and self.status_cache[str(page_number)] == "success":
+        if self.cache_steamchart.get(page_number) and self.cache_steamchart.get(page_number).get("status") == "success" and not self.cache.is_stale(page_number, hours=24):
             return
         
         base_url = "https://steamcharts.com/top/p.{}"
@@ -106,7 +81,7 @@ class SteamListFetcher:
             
             if not table:
                 self.failed_pages.append(page_number)
-                self.status_cache[str(page_number)] = "no_table"
+                self.cache_steamchart.set(page_number, "no_table")
                 self.logger.warning(f"페이지 {page_number}에 테이블이 없습니다.")
                 return
             
@@ -123,27 +98,24 @@ class SteamListFetcher:
                         game_name = game_link.text.strip()
                         self.game_data.append((rank, appid, game_name))
             
-            self.status_cache[str(page_number)] = {
-                "status": "success",
-                "collected_at": datetime.now().isoformat()
-            }
+            self.cache_steamchart.set(page_number, { "status": "success" })
             
         except Timeout:
             self.failed_pages.append(page_number)
-            self.status_cache[page_number] = "timeout"
+            self.cache_steamchart.set(page_number, "timeout")
             self.logger.warning(f"[페이지 {page_number}] 요청 타임아웃")
             raise
             
         except ConnectionError as e:
             self.failed_pages.append(page_number)
-            self.status_cache[page_number] = "connection_error"
+            self.cache_steamchart.set(page_number, "connection_error")
             self.logger.error(f"[페이지 {page_number}] 연결 오류: {e}")
             raise
             
         except HTTPError as e:
             self.failed_pages.append(page_number)
             status_code = getattr(e.response, 'status_code', None)
-            self.status_cache[page_number] = f"http_error_{status_code}"
+            self.cache_steamchart.set(page_number, f"http_error_{status_code}")
             
             if status_code == 429:  # Rate limit
                 self.logger.warning(f"[페이지 {page_number}] 요청 제한 감지")
@@ -151,15 +123,16 @@ class SteamListFetcher:
                 
         except Exception as e:
             self.failed_pages.append(page_number)
-            self.status_cache[page_number] = "error"
+            self.cache_steamchart.set(page_number, "error")
             self.logger.error(f"[페이지 {page_number}] 에러 발생: {e}")
             raise
     
     def scrape_steamcharts_parallel(self):
         """페이지를 병렬로 스크래핑"""
         pages_to_scrape = [page for page in range(1, int(self.STEAMCHARTS_GAMES/25) + 1) 
-                           if str(page) not in self.status_cache or 
-                           self.status_cache[str(page)] != "success"]
+                           if not self.cache_steamchart.get(page) or 
+                           self.cache_steamchart.get(page).get("status") != "success" or 
+                           self.cache_steamchart.is_stale(page, hours=24)]
         
         with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
             futures = []
@@ -183,8 +156,8 @@ class SteamListFetcher:
             save_csv(games_list_df, self.steamcharts_path)
             
             # 캐시와 상태 저장
-            save_json(self.CACHE_FILE, self.status_cache)
-            
+            self.cache_steamchart.save()
+                        
             # 실패한 페이지 저장
             if self.failed_pages:
                 failed_pages_df = pd.DataFrame({"page": self.failed_pages})
@@ -198,6 +171,9 @@ class SteamListFetcher:
     
     def fetch_all_apps(self):
         """Steam API를 사용하여 전체 앱 리스트 가져오기"""
+        if self.cache_all_apps.get("all_apps") and not self.cache_all_apps.is_stale("all_apps", hours=24):
+            self.logger.info("ℹ️ 최근 24시간 내 수집된 앱 리스트가 있어 건너뜁니다.")
+            return      
         all_apps = []
         last_appid = 0
 
@@ -237,16 +213,30 @@ class SteamListFetcher:
         save_csv(df, self.all_apps_path)
         self.logger.info(f"✅ 전체 앱 리스트 저장 완료: {self.all_apps_path}")
 
+        self.cache_all_apps.set(
+            "all_apps", {
+                "status": "success", 
+                "collected_at": datetime.now().isoformat(), 
+                "number_of_apps": len(parsed_data) 
+            })
+        self.cache_all_apps.save()
+        
     def filter_common_ids(self):
         """SteamCharts와 전체 앱 리스트의 공통 ID 필터링"""
         try:
             # 파일 로드
             steamcharts_df = pd.read_csv(self.steamcharts_path)
             all_apps_df = pd.read_csv(self.all_apps_path)
-
+            if self.common_ids_path.exists():
+                old_ids_df = pd.read_csv(self.common_ids_path)
+            else:
+                old_ids_df = pd.DataFrame(columns=["appid", "name"])
+                
             # 공통 ID 필터링
             common_ids_df = all_apps_df[all_apps_df["appid"].isin(steamcharts_df["appid"])]
-            save_csv(common_ids_df, self.common_ids_path)
+            new_only_df = common_ids_df[~common_ids_df["appid"].isin(old_ids_df["appid"])]
+            updated_df = pd.concat([old_ids_df, new_only_df], ignore_index=True).drop_duplicates(subset="appid")
+            save_csv(updated_df, self.common_ids_path)
             
             self.logger.info(f"✅ 공통 ID 저장 완료: {self.common_ids_path}")
             self.logger.info(f"공통 ID 수: {len(common_ids_df)}")

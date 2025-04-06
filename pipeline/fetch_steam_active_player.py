@@ -8,6 +8,7 @@ from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 
 from util.io_helper import load_json, save_json, save_csv  
+from util.cache_manager import CacheManager
 from util.logger import setup_logger
 
 class SteamActivePlayerFetcher:
@@ -50,36 +51,16 @@ class SteamActivePlayerFetcher:
         self.players_data = []
         self.failed_list = []
         self.errored_list = []
-        self.status_cache = self._load_cache()
-        
-    def _load_cache(self):
-        """캐시 파일에서 상태 정보 로드"""
-        try:
-            cache = load_json(self.CACHE_FILE)
-            if not isinstance(cache, dict):
-                self.logger.warning("⚠️ 캐시 파일이 비정상적입니다. 빈 캐시로 초기화합니다.")
-                return {}
-            # 중복 키 제거 (마지막 값 유지)
-            deduplicated_cache = {}
-            for key, value in cache.items():
-                deduplicated_cache[key] = value
-            
-            # 로깅 추가: 중복 제거된 키의 수 확인
-            original_count = len(cache)
-            deduplicated_count = len(deduplicated_cache)
-            
-            if original_count != deduplicated_count:
-                self.logger.info(f"🔍 캐시에서 {original_count - deduplicated_count}개의 중복 키가 제거되었습니다.")
-            
-            return deduplicated_cache
-        
-        except Exception as e:
-            self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
-            return {}
+        self.cache = CacheManager(self.CACHE_FILE)
         
     def fetch_active_player_data(self, app_id):
         """Steam API에서 활성 플레이어 데이터 가져오기"""
-        if str(app_id) in self.status_cache and self.status_cache[str(app_id)] == "success":
+        cached = self.cache.get(app_id)
+        if cached and cached.get("status") == "success" and not self.cache.is_stale(app_id, hours=24):
+            self.logger.info(f"[{app_id}] 캐시된 데이터 사용")
+            return
+        if self.cache.too_many_fails(app_id):
+            self.logger.warning(f"🚫 앱 {app_id}은 실패가 누적되어 건너뜁니다.")
             return
         
         url = f"https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid={app_id}"
@@ -90,7 +71,7 @@ class SteamActivePlayerFetcher:
 
             if not response_json or "response" not in response_json:
                 self.failed_list.append(app_id)
-                self.status_cache[app_id] = "failed"
+                self.cache.record_fail(app_id)
                 return
 
             player_data = response_json.get("response", {})
@@ -100,30 +81,30 @@ class SteamActivePlayerFetcher:
                     "player_count": player_data.get("player_count", 0)
                 }
                 self.players_data.append(active_player_data)
-                self.status_cache[app_id] = {
+                self.cache.set(app_id, {
                     "status": "success",
                     "collected_at": datetime.now().isoformat()
-                }
+                })
             else:
                 self.failed_list.append(app_id)
-                self.status_cache[app_id] = "no_data"
+                self.cache.record_fail(app_id)
                 
         except Timeout:
             self.errored_list.append(app_id)
-            self.status_cache[app_id] = "timeout"
+            self.cache.record_fail(app_id)  
             self.logger.warning(f"[{app_id}] 요청 타임아웃")
             raise
             
         except ConnectionError as e:
             self.errored_list.append(app_id)
-            self.status_cache[app_id] = "connection_error"
+            self.cache.record_fail(app_id)  
             self.logger.error(f"[{app_id}] 연결 오류: {e}")
             raise
             
         except HTTPError as e:
             self.errored_list.append(app_id)
             status_code = getattr(e.response, 'status_code', None)
-            self.status_cache[app_id] = f"http_error_{status_code}"
+            self.cache.set(app_id, f"http_error_{status_code}")
             
             if status_code == 429:  # Rate limit
                 self.logger.warning(f"[{app_id}] 요청 제한 감지")
@@ -131,7 +112,7 @@ class SteamActivePlayerFetcher:
                 
         except Exception as e:
             self.errored_list.append(app_id)
-            self.status_cache[app_id] = "error"
+            self.cache.record_fail(app_id)
             self.logger.error(f"[{app_id}] 에러 발생: {e}")
             raise
         
@@ -148,15 +129,10 @@ class SteamActivePlayerFetcher:
                 merged_player_df.drop_duplicates(subset="appid", inplace=True)
             else:
                 merged_player_df = new_player_df
-                
-            # 상태 캐시의 중복 제거
-            clean_status_cache = {}
-            for key, value in self.status_cache.items():
-                clean_status_cache[key] = value
             
             # 저장 (io_helper의 save_csv, save_json 활용)
             save_csv(merged_player_df, self.players_df_path)
-            save_json(self.CACHE_FILE, clean_status_cache)
+            self.cache.save()
             
             # 진행 상황 출력
             total = len(self.players_data) + len(self.failed_list) + len(self.errored_list)
@@ -233,7 +209,7 @@ class SteamActivePlayerFetcher:
         
         # 실패한 ID 가져오기
         failed_ids_from_cache = [
-            int(app_id) for app_id, status in self.status_cache.items()
+            int(app_id) for app_id, status in self.cache.items()
             if status == "failed"
         ]
         self.logger.info(f"캐시에서 실패한 ID 수: {len(failed_ids_from_cache)}")
@@ -249,7 +225,7 @@ class SteamActivePlayerFetcher:
         retry_ids = set(failed_ids_from_cache + failed_ids_from_file)
         
         # 이미 성공한 ID는 제외
-        retry_ids = [appid for appid in retry_ids if self.status_cache.get(appid) != "success"]
+        retry_ids = [appid for appid in retry_ids if self.cache.get(appid) != "success"]
         retry_ids = list(set(retry_ids))
         self.logger.info(f"재시도할 ID 수: {len(retry_ids)}")
         
