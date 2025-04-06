@@ -12,7 +12,12 @@ class CacheManager:
         return self.cache.get(str(key), None)
 
     def set(self, key, value):
+        if isinstance(value, dict):
+            value.setdefault("collected_at", datetime.now().isoformat())
         self.cache[str(key)] = value
+        
+    def items(self):
+        return self.cache.items()
 
     def is_stale(self, key, hours):
         entry = self.get(key)
@@ -28,7 +33,10 @@ class CacheManager:
         save_json(self.path, self.cache)
 
     def record_fail(self, key):
-        self.cache[str(key)] = "failed"
+        self.cache[str(key)] = {
+            "status": "failed",
+            "collected_at": datetime.now().isoformat()
+            }
 
     def too_many_fails(self, key, max_attempts=3):
         entry = self.get(key)
