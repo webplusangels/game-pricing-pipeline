@@ -6,12 +6,7 @@ from pathlib import Path
 
 from config import settings
 
-DB_HOST = settings.DB_HOST
-DB_NAME = settings.DB_NAME
-DB_USER = settings.DB_USER
-DB_PASS = settings.DB_PASS
-DB_PORT = settings.DB_PORT
-DB_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DB_URL = settings.DB_URL
 
 engine = create_engine(DB_URL)
 data_dir = Path("data/backup")
