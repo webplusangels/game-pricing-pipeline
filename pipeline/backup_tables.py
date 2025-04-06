@@ -4,9 +4,7 @@ from config import settings
 from pathlib import Path
 
 def backup_tables_to_csv(tables, output_dir = "data/processed", backup_dir = "data/backup"):
-    engine = create_engine(
-        f"postgresql://{settings.DB_USER}:{settings.DB_PASS}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
-    )
+    engine = create_engine(settings.DB_URL)
     
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     Path(backup_dir).mkdir(parents=True, exist_ok=True)
