@@ -9,6 +9,7 @@ from datetime import datetime
 from config import settings
 
 from util.io_helper import load_json, save_json, save_csv
+from util.cache_manager import CacheManager
 from util.logger import setup_logger
 from util.rate_limit_manager import RateLimitManager
 
@@ -62,33 +63,33 @@ class ITADPriceFetcher:
         self.fetched_data = []
         self.failed_list = []
         self.errored_list = []
-        self.status_cache = self._load_cache()
-    
-    def _load_cache(self):
-        """캐시 파일에서 상태 정보 로드"""
-        try:
-            cache = load_json(self.CACHE_FILE)
-            if not isinstance(cache, dict):
-                self.logger.warning("⚠️ 캐시 파일이 비정상적입니다. 빈 캐시로 초기화합니다.")
-                return {}
+        self.cache = CacheManager(self.CACHE_FILE)
+        
+    # def _load_cache(self):
+    #     """캐시 파일에서 상태 정보 로드"""
+    #     try:
+    #         cache = load_json(self.CACHE_FILE)
+    #         if not isinstance(cache, dict):
+    #             self.logger.warning("⚠️ 캐시 파일이 비정상적입니다. 빈 캐시로 초기화합니다.")
+    #             return {}
             
-            # 중복 키 제거 (마지막 값 유지)
-            deduplicated_cache = {}
-            for key, value in cache.items():
-                deduplicated_cache[key] = value
+    #         # 중복 키 제거 (마지막 값 유지)
+    #         deduplicated_cache = {}
+    #         for key, value in cache.items():
+    #             deduplicated_cache[key] = value
             
-            # 로깅 추가: 중복 제거된 키의 수 확인
-            original_count = len(cache)
-            deduplicated_count = len(deduplicated_cache)
+    #         # 로깅 추가: 중복 제거된 키의 수 확인
+    #         original_count = len(cache)
+    #         deduplicated_count = len(deduplicated_cache)
             
-            if original_count != deduplicated_count:
-                self.logger.info(f"🔍 캐시에서 {original_count - deduplicated_count}개의 중복 키가 제거되었습니다.")
+    #         if original_count != deduplicated_count:
+    #             self.logger.info(f"🔍 캐시에서 {original_count - deduplicated_count}개의 중복 키가 제거되었습니다.")
             
-            return deduplicated_cache
+    #         return deduplicated_cache
             
-        except Exception as e:
-            self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
-            return {}
+    #     except Exception as e:
+    #         self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
+    #         return {}
     
     def load_game_ids(self):
         """게임 ID 파일에서 게임 ID 목록 로드"""
@@ -114,7 +115,6 @@ class ITADPriceFetcher:
 
         except Exception as e:
             self.logger.error(f"게임 ID 로드 중 오류 발생: {e}")
-            print(f"❌ 게임 ID 로드 중 오류: {e}")
             return pd.DataFrame()
     
     def get_game_prices(self, game_ids_batch):
@@ -157,8 +157,15 @@ class ITADPriceFetcher:
 
             processed_ids.add(game_id)
 
-            if game_id in self.status_cache and self.status_cache[game_id] == "success":
+            cached = self.cache.get(game_id)
+
+            if cached and cached.get("status") == "success" and \
+            not self.cache.is_stale(game_id, hours=6):
                 self.logger.info(f"[{game_id}] 이미 수집된 데이터, 건너뜀")
+                continue
+
+            if self.cache.too_many_fails(game_id):
+                self.logger.info(f"🚫 앱 {game_id}은 실패가 누적되어 건너뜁니다.")
                 continue
 
             if game_id not in data:
@@ -177,26 +184,6 @@ class ITADPriceFetcher:
                     history_low_currency = game_data['historyLow']['all'].get('currency')
                     self.logger.debug(f"[{game_id}] 역대 최저가: {history_low_price} {history_low_currency}")
 
-                # # 딜 정보가 없는 경우 처리
-                # if 'deals' not in game_data or not game_data['deals']:
-                #     self.logger.info(f"[{game_id}] 딜 정보가 없습니다.")
-                #     result = {
-                #         'itad_id': game_id,
-                #         'history_low_price': history_low_price,
-                #         'history_low_currency': history_low_currency,
-                #         'shop_id': None,
-                #         'shop_name': None,
-                #         'current_price': None,
-                #         'regular_price': None,
-                #         'discount_percent': None,
-                #         'currency': None,
-                #         'collected_at': datetime.now().isoformat()
-                #     }
-                #     results.append(result)
-                #     self.status_cache[game_id] = "success"
-                #     continue
-
-                ####################################
                 # 딜 정보 로깅
                 if 'deals' not in game_data:
                     self.logger.warning(f"[{game_id}] 'deals' 키가 없습니다: {game_data}")
@@ -221,14 +208,17 @@ class ITADPriceFetcher:
                     }
                     results.append(result)
 
-                self.status_cache[game_id] = "success"
+                self.cache.set(game_id, {
+                    "status": "success",
+                    "collected_at": datetime.now().isoformat()
+                })
                 self.logger.info(f"[{game_id}] 처리 완료: {len(game_data.get('deals', []))}개의 딜 정보")
 
             except Exception as e:
                 self.logger.error(f"[{game_id}] 데이터 처리 중 오류: {e}")
                 self.errored_list.append(game_id)
-                self.status_cache[game_id] = "error"
-
+                self.cache.record_fail(game_id)
+                
         return results
     
     def fetch_batch(self, game_ids_batch):
@@ -239,8 +229,6 @@ class ITADPriceFetcher:
         while retry_count < max_retries:
             try:
                 self.logger.info(f"배치 요청 시작: {len(game_ids_batch)}개 게임")
-                #####################################
-                self.logger.info(f"요청 게임 ID 샘플: {game_ids_batch[:5]}...")
                 
                 # 요청 제한 상황에 따라 지연 시간 조정
                 if self.rate_limit_manager.should_slow_down():
@@ -297,40 +285,27 @@ class ITADPriceFetcher:
             new_data_df = pd.DataFrame(self.fetched_data)
     
             if self.OUTPUT_FILE.exists():
-                try:
-                    old_data_df = pd.read_csv(self.OUTPUT_FILE)
-                    merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
-                    if 'shop_id' in merged_df.columns:
-                        merged_df.drop_duplicates(subset=['itad_id', 'shop_id'], keep='last', inplace=True)
-                    else:
-                        merged_df.drop_duplicates(subset=['itad_id'], keep='last', inplace=True)
-                    save_csv(merged_df, self.OUTPUT_FILE)
-                except Exception as e:
-                    self.logger.error(f"기존 CSV 병합 중 오류: {e}")
-                    backup_path = self.ERROR_DIR / f"itad_game_prices_backup_{int(time.time())}.csv"
-                    save_csv(new_data_df, backup_path)
-                    self.logger.info(f"새 데이터를 백업 파일에 저장: {backup_path}")
+                old_data_df = pd.read_csv(self.OUTPUT_FILE)
+                merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
+                if 'shop_id' in merged_df.columns:
+                    merged_df.drop_duplicates(subset=['itad_id', 'shop_id'], keep='last', inplace=True)
+                else:
+                    merged_df.drop_duplicates(subset=['itad_id'], keep='last', inplace=True)
             else:
-                save_csv(new_data_df, self.OUTPUT_FILE)
+                merged_df = new_data_df
     
-            # 캐시 저장
-            save_json(self.CACHE_FILE, self.status_cache)
+            # 저장
+            save_csv(merged_df, self.OUTPUT_FILE)
+            self.cache.save()
     
             # 정보 출력
             total_processed = len(set([d['itad_id'] for d in self.fetched_data]))
             self.logger.info(f"체크포인트 저장 완료. 총 {total_processed}개 게임, {len(self.fetched_data)}개 딜 정보 저장")
     
-            if self.OUTPUT_FILE.exists():
-                df = pd.read_csv(self.OUTPUT_FILE)
-                unique_games = df['itad_id'].nunique()
-                total_deals = len(df)
-                print(f"💾 중간 저장 완료 - 누적 수집: {unique_games}개 게임, {total_deals}개 딜 정보")
-    
             self.fetched_data = []
 
         except Exception as e:
             self.logger.error(f"체크포인트 저장 중 오류: {e}")
-            print(f"❌ 체크포인트 저장 중 오류: {e}")
     
     def fetch_in_parallel(self, game_ids, batch_size=40):
         """병렬 처리로 게임 가격 정보 수집"""
@@ -338,7 +313,6 @@ class ITADPriceFetcher:
         
         with tqdm(total=len(batches), desc="🔍 배치 처리") as pbar:
             for i, batch in enumerate(batches):
-                print(f"\n배치 {i+1}/{len(batches)} 처리 중 ({len(batch)}개 게임)")
                 with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
                     future = executor.submit(self.fetch_batch, batch)
                     future.result()
@@ -353,11 +327,9 @@ class ITADPriceFetcher:
         if not retry_ids:
             return
         
-        print(f"\n🔁 총 {len(retry_ids)}개 실패 ID에 대해 재시도 시작")
         self.logger.info(f"총 {len(retry_ids)}개 실패 ID에 대해 재시도 시작")
 
         for round_num in range(1, max_retry_rounds + 1):
-            print(f"\n🔄 재시도 라운드 {round_num}/{max_retry_rounds}")
             self.logger.info(f"재시도 라운드 {round_num}/{max_retry_rounds}")
             self.failed_list = []
             self.errored_list = []
@@ -373,27 +345,7 @@ class ITADPriceFetcher:
             retry_ids = list(set(self.failed_list + self.errored_list))
             if not retry_ids:
                 self.logger.info("✅ 재시도 성공! 더 이상 실패한 ID가 없습니다.")
-                print("✅ 재시도 성공! 더 이상 실패한 ID가 없습니다.")
                 break
-                
-        # if retry_ids:
-        #     self.logger.info(f"❌ 여전히 실패한 ID 수: {len(retry_ids)}")
-        #     print(f"❌ 여전히 실패한 ID 수: {len(retry_ids)}")
-        #     for game_id in retry_ids:
-        #         self.status_cache[game_id] = "no_data"
-        #         self.fetched_data.append({
-        #             'itad_id': game_id,
-        #             'history_low_price': None,
-        #             'history_low_currency': None,
-        #             'shop_id': None,
-        #             'shop_name': None,
-        #             'current_price': None,
-        #             'regular_price': None,
-        #             'discount_percent': None,
-        #             'currency': None,
-        #             'collected_at': datetime.now().isoformat()
-        #         })    
-        #     self.save_checkpoint()
     
     def run(self, batch_size=40):
         """전체 데이터 수집 프로세스 실행"""
@@ -401,18 +353,15 @@ class ITADPriceFetcher:
             game_ids_df = self.load_game_ids()
             if game_ids_df.empty:
                 self.logger.warning("❌ 처리할 게임 ID가 없습니다.")
-                print("❌ 처리할 게임 ID가 없습니다.")
                 return
 
             game_ids = game_ids_df['itad_id'].dropna().tolist()
             if not game_ids:
                 self.logger.warning("❌ 유효한 itad_id가 없습니다.")
-                print("❌ 유효한 itad_id가 없습니다.")
                 return
 
             total_games = len(game_ids)
             self.logger.info(f"📋 총 {total_games}개 게임 가격 정보 수집 시작")
-            print(f"📋 총 {total_games}개 게임 가격 정보 수집 시작")
 
             # 1차 수집
             self.fetch_in_parallel(game_ids, batch_size=batch_size)
@@ -421,14 +370,11 @@ class ITADPriceFetcher:
             self.retry_failed_ids(batch_size=batch_size, max_retry_rounds=2)
 
             # 최종 통계
-            total_success = sum(1 for status in self.status_cache.values() if status == "success")
+            total_success = sum(1 for status in self.cache.values() if status == "success")
             self.logger.info("\n✅ 데이터 수집 완료")
             self.logger.info(f"🎯 성공: {total_success}개 게임")
             self.logger.info(f"❌ 실패: {len(self.failed_list)}개, 에러: {len(self.errored_list)}개")
-            print("\n✅ 데이터 수집 완료")
-            print(f"🎯 성공: {total_success}개 게임")
-            print(f"❌ 실패: {len(self.failed_list)}개, 에러: {len(self.errored_list)}개")
-
+            
             # 실패한 ID 목록 저장
             if self.failed_list or self.errored_list:
                 failed_df = pd.DataFrame({
@@ -437,8 +383,7 @@ class ITADPriceFetcher:
                 })
                 save_csv(failed_df, self.FAILED_IDS_FILE)
                 self.logger.info(f"❗ 실패한 ID 목록이 {self.FAILED_IDS_FILE}에 저장되었습니다.")
-                print(f"❗ 실패한 ID 목록이 {self.FAILED_IDS_FILE}에 저장되었습니다.")
-
+                
             # 최종 결과 출력
             if self.OUTPUT_FILE.exists():
                 final_df = pd.read_csv(self.OUTPUT_FILE)
@@ -448,13 +393,9 @@ class ITADPriceFetcher:
                 self.logger.info(f"\n📊 최종 결과:")
                 self.logger.info(f"총 {unique_games}개 게임, {total_deals}개 딜 정보 수집")
                 self.logger.info(f"상점별 분포: {shops_count}")
-                print(f"\n📊 최종 결과:")
-                print(f"총 {unique_games}개 게임, {total_deals}개 딜 정보 수집")
-                print(f"상점별 분포: {shops_count}")
 
         except Exception as e:
             self.logger.error(f"프로세스 실행 중 오류: {e}")
-            print(f"❌ 오류 발생: {e}")
 
 # # 사용 예시
 # if __name__ == "__main__":
