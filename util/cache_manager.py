@@ -18,6 +18,12 @@ class CacheManager:
         
     def items(self):
         return self.cache.items()
+    
+    def values(self):
+        return self.cache.values()
+
+    def keys(self):
+        return self.cache.keys()
 
     def is_stale(self, key, hours):
         entry = self.get(key)
