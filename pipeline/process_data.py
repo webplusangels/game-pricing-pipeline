@@ -35,10 +35,75 @@ class DataProcessor:
             "game_dynamic": self.parse_game_dynamic,
             "game_static": self.parse_game_static,
         }
+        
+        self.index_columns_map = {
+            "category": ["id"],
+            "platform": ["id"],
+            "game_static": ["id"],
+            "game_dynamic": ["game_id"],
+            "game_category": ["id"],
+            "current_price_by_platform": ["game_id", "platform_id"]
+        }
+        
+        self.table_dtypes = {
+            "category": {
+                'id': int,
+                'category_name': str
+            },
+            "platform": {
+                'id': int,
+                'name': str
+            },
+            "game_static": {
+                'id': int,
+                'title': str,
+                'original_title': str,
+                'description': str,
+                'release_date': str,
+                'publisher': str,
+                'developer': str,
+                'thumbnail': str,
+                'price': int,
+                'is_singleplay': bool,
+                'is_multiplay': bool
+            },
+            "game_dynamic": {
+                'game_id': int,
+                'rating': int,
+                'active_players': int,
+                'lowest_platform': int,
+                'lowest_price': int,
+                'history_lowest_price': int,
+                'on_sale': bool,
+                'total_reviews': int
+            },
+            "game_category": {
+                'id': int,
+                'category_id': int,
+                'game_id': int
+            },
+            "current_price_by_platform": {
+                'game_id': int,
+                'platform_id': int,
+                'discount_rate': int,
+                'discount_price': int,
+                'url': str
+            }
+        }
 
+    def sort_by_index_columns(self, df, table_name):
+        sort_keys = self.index_columns_map.get(table_name)
+        
+        if sort_keys and all(col in df.columns for col in sort_keys):
+            return df.sort_values(by=sort_keys).reset_index(drop=True)
+        return df
+    
     def difference(self, new_df, old_df):
+        sort_cols = [col for col in new_df.columns if col in old_df.columns]
+        new_df = new_df.sort_values(by=sort_cols).reset_index(drop=True)
+        old_df = old_df.sort_values(by=sort_cols).reset_index(drop=True)
+        
         diff_df = pd.merge(new_df, old_df, how="outer", indicator=True)
-
         only_new = diff_df[diff_df["_merge"] == "left_only"]  # 새로 생긴 행
         only_old = diff_df[diff_df["_merge"] == "right_only"]  # 삭제된 행
         return only_new, only_old
@@ -54,6 +119,7 @@ class DataProcessor:
         processed_path = self.data_processed_dir / filename
         updated_path = self.data_processed_dir / filename.replace(".csv", "_updated.csv")
         removed_path = self.data_processed_dir / filename.replace(".csv", "_removed.csv")
+
 
         if prev_df is not None:
             only_new, only_old = self.difference(df, prev_df)
@@ -113,19 +179,7 @@ class DataProcessor:
             'is_singleplay', 'is_multiplay'
         ]]
 
-        static_df = static_df.astype({
-            'id': int,
-            'title': str,
-            'original_title': str,
-            'description': str,
-            'release_date': str,
-            'publisher': str,
-            'developer': str,
-            'thumbnail': str,
-            'price': int,
-            'is_singleplay': bool,
-            'is_multiplay': bool
-        })
+        static_df = static_df.astype(self.table_dtypes['game_static'])
 
         self.save_if_changed(static_df, "game_static.csv")
 
@@ -182,16 +236,7 @@ class DataProcessor:
             'history_lowest_price', 'on_sale', 'total_reviews'
         ]]
 
-        dynamic_df = dynamic_df.astype({
-            'game_id': int,
-            'rating': int,
-            'active_players': int,
-            'lowest_platform': int,
-            'lowest_price': int,
-            'history_lowest_price': int,
-            'on_sale': bool,
-            'total_reviews': int
-        })
+        dynamic_df = dynamic_df.astype(self.table_dtypes['game_dynamic'])
         
         self.save_if_changed(dynamic_df, "game_dynamic.csv")
 
@@ -228,11 +273,7 @@ class DataProcessor:
         game_category_df = pd.DataFrame(mapping_rows, columns=['category_id', 'game_id'])
         game_category_df.insert(0, 'id', range(1, len(game_category_df) + 1))  
         
-        game_category_df = game_category_df.astype({
-            'id': int,
-            'category_id': int,
-            'game_id': int,
-        })
+        game_category_df = game_category_df.astype(self.table_dtypes['game_category'])
 
         self.save_if_changed(game_category_df, "game_category.csv")
                    
@@ -273,13 +314,7 @@ class DataProcessor:
         steam_games = steam_games.rename(columns={'appid': 'game_id', 'initial_price': 'discount_price'})
         current_price_df = pd.concat([current_price_df, steam_games], ignore_index=True)   
         
-        current_price_df = current_price_df.astype({
-            'game_id': int,
-            'platform_id': int,
-            'discount_rate': int,
-            'discount_price': int,
-            'url': str
-        })
+        current_price_df = current_price_df.astype(self.table_dtypes['current_price_by_platform'])
         
         self.save_if_changed(current_price_df, "current_price_by_platform.csv")
         save_csv(current_price_df, self.data_processed_dir / 'current_price_by_platform.csv')
@@ -295,10 +330,7 @@ class DataProcessor:
             'category_name': unique_category
         })
 
-        unique_category_df = unique_category_df.astype({
-            'id': int,
-            'category_name': str,
-        })
+        unique_category_df = unique_category_df.astype(self.table_dtypes['category'])
 
         self.save_if_changed(unique_category_df, "category.csv")
         
@@ -313,10 +345,7 @@ class DataProcessor:
             .rename(columns={"shop_id": "id", "shop_name": "name"})  # 열 이름 변경
         )
         
-        unique_platform_df = unique_platform_df.astype({
-            'id': int,
-            'name': str,
-        })
+        unique_platform_df = unique_platform_df.astype(self.table_dtypes['platform'])
 
         self.save_if_changed(unique_platform_df, "platform.csv")
 
