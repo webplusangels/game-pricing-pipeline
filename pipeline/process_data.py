@@ -98,14 +98,34 @@ class DataProcessor:
             return df.sort_values(by=sort_keys).reset_index(drop=True)
         return df
     
-    def difference(self, new_df, old_df):
-        sort_cols = [col for col in new_df.columns if col in old_df.columns]
-        new_df = new_df.sort_values(by=sort_cols).reset_index(drop=True)
-        old_df = old_df.sort_values(by=sort_cols).reset_index(drop=True)
+    def difference(self, new_df, old_df, table_name):
+        new_df = self.sort_by_index_columns(new_df, table_name)
+        old_df = self.sort_by_index_columns(old_df, table_name)
         
-        diff_df = pd.merge(new_df, old_df, how="outer", indicator=True)
-        only_new = diff_df[diff_df["_merge"] == "left_only"]  # 새로 생긴 행
-        only_old = diff_df[diff_df["_merge"] == "right_only"]  # 삭제된 행
+        index_cols = self.index_columns_map.get(table_name)
+        merged = pd.merge(
+            new_df, old_df, on=index_cols, how="outer", suffixes=('_new', '_old'), indicator=True
+        )
+        
+        updated_rows = []
+        for _, row in merged.iterrows():
+            if row['_merge'] == 'both':
+                changed = any(
+                    row[f'{col}_new'] != row[f'{col}_old']
+                    for col in new_df.columns if col not in index_cols
+                )
+                if changed:
+                    updated_rows.append(row[[f'{col}_new' for col in new_df.columns]])
+            elif row['_merge'] == 'left_only':
+                updated_rows.append(row[[f'{col}_new' for col in new_df.columns]])
+        
+        only_new = pd.DataFrame(updated_rows)
+        only_new.columns = new_df.columns
+        
+        only_old = merged[merged['_merge'] == 'right_only']
+        only_old = only_old[[f'{col}_old' for col in old_df.columns]]
+        only_old.columns = old_df.columns
+        
         return only_new, only_old
     
     def load_previous_if_exists(self, filename):
@@ -114,15 +134,14 @@ class DataProcessor:
             return load_csv(prev_path)
         return None
 
-    def save_if_changed(self, df, filename):
+    def save_if_changed(self, df, filename, table_name):
         prev_df = self.load_previous_if_exists(filename)
         processed_path = self.data_processed_dir / filename
         updated_path = self.data_processed_dir / filename.replace(".csv", "_updated.csv")
         removed_path = self.data_processed_dir / filename.replace(".csv", "_removed.csv")
 
-
         if prev_df is not None:
-            only_new, only_old = self.difference(df, prev_df)
+            only_new, only_old = self.difference(df, prev_df, table_name)
             if only_new.empty and only_old.empty:
                 self.logger.info(f"{filename} 변경 없음 → 저장 생략")
                 if processed_path.exists():
@@ -180,8 +199,9 @@ class DataProcessor:
         ]]
 
         static_df = static_df.astype(self.table_dtypes['game_static'])
+        static_df = self.sort_by_index_columns(static_df, "game_static")
 
-        self.save_if_changed(static_df, "game_static.csv")
+        self.save_if_changed(static_df, "game_static.csv", "game_static")
 
     def parse_game_dynamic(self):
         """동적 게임 정보 테이블"""
@@ -237,8 +257,9 @@ class DataProcessor:
         ]]
 
         dynamic_df = dynamic_df.astype(self.table_dtypes['game_dynamic'])
+        dynamic_df = self.sort_by_index_columns(dynamic_df, "game_dynamic")
         
-        self.save_if_changed(dynamic_df, "game_dynamic.csv")
+        self.save_if_changed(dynamic_df, "game_dynamic.csv", "game_dynamic")
 
     def parse_game_category(self):
         """게임 카테고리 테이블"""
@@ -274,8 +295,9 @@ class DataProcessor:
         game_category_df.insert(0, 'id', range(1, len(game_category_df) + 1))  
         
         game_category_df = game_category_df.astype(self.table_dtypes['game_category'])
+        game_category_df = self.sort_by_index_columns(game_category_df, "game_category")
 
-        self.save_if_changed(game_category_df, "game_category.csv")
+        self.save_if_changed(game_category_df, "game_category.csv", "game_category")
                    
     def parse_current_price_by_platform(self):
         """플랫폼별 현재 가격 테이블"""
@@ -307,18 +329,18 @@ class DataProcessor:
         ]
         
         # 모든 게임이 shop_id가 61인 경우 추가
-        steam_games = self.detail_parsed_df[['appid', 'initial_price']].copy()
+        steam_games = self.detail_parsed_df[['appid', 'final_price', 'discount_percent']].copy()
         steam_games['platform_id'] = 61  # Steam의 shop_id
-        steam_games['discount_rate'] = 0  # 할인율 0%
         steam_games['url'] = steam_games['appid'].apply(lambda x: f'https://store.steampowered.com/app/{x}/')
-        steam_games = steam_games.rename(columns={'appid': 'game_id', 'initial_price': 'discount_price'})
+        steam_games = steam_games.rename(columns={'appid': 'game_id', 'final_price': 'discount_price', 'discount_percent': 'discount_rate'})
         current_price_df = pd.concat([current_price_df, steam_games], ignore_index=True)   
         
         current_price_df = current_price_df.astype(self.table_dtypes['current_price_by_platform'])
         
         self.save_if_changed(current_price_df, "current_price_by_platform.csv")
-        save_csv(current_price_df, self.data_processed_dir / 'current_price_by_platform.csv')
-
+        current_price_df = self.sort_by_index_columns(current_price_df, "current_price_by_platform")
+        
+        save_csv(current_price_df, self.data_processed_dir / 'current_price_by_platform.csv', 'current_price_by_platform')
         
     def parse_category(self):
         """카테고리 테이블"""
@@ -331,8 +353,9 @@ class DataProcessor:
         })
 
         unique_category_df = unique_category_df.astype(self.table_dtypes['category'])
+        unique_category_df = self.sort_by_index_columns(unique_category_df, "category")
 
-        self.save_if_changed(unique_category_df, "category.csv")
+        self.save_if_changed(unique_category_df, "category.csv", "category")
         
     def parse_platform(self):
         """플랫폼 테이블"""
@@ -346,8 +369,9 @@ class DataProcessor:
         )
         
         unique_platform_df = unique_platform_df.astype(self.table_dtypes['platform'])
+        unique_platform_df = self.sort_by_index_columns(unique_platform_df, "platform")
 
-        self.save_if_changed(unique_platform_df, "platform.csv")
+        self.save_if_changed(unique_platform_df, "platform.csv", "platform")
 
     def run(self):
         keep_filenames = set(f"{name}.csv" for name in self.table_parsers)
