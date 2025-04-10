@@ -90,7 +90,7 @@ EXECUTE FUNCTION set_updated_at();
 -- 5. game_category
 -- DROP TABLE IF EXISTS game_category CASCADE;
 CREATE TABLE game_category (
-		id BIGSERIAL PRIMARY KEY,
+	id BIGSERIAL PRIMARY KEY,
     category_id BIGINT REFERENCES category(id) ON DELETE CASCADE,  -- 삭제 전략 추가
     game_id BIGINT REFERENCES game_static(id) ON DELETE CASCADE  -- 삭제 전략 추가
 );
@@ -105,8 +105,9 @@ CREATE TABLE current_price_by_platform (
     platform_id BIGINT NOT NULL REFERENCES platform(id) ON DELETE CASCADE,
     discount_rate INT NOT NULL,
     discount_price INT NOT NULL,
-    url TEXT NOT NULL,
+    url VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP DEFAULT now()
     PRIMARY KEY (game_id, platform_id)
 );
 
@@ -116,6 +117,7 @@ COMMENT ON COLUMN current_price_by_platform.discount_rate IS '할인율';
 COMMENT ON COLUMN current_price_by_platform.discount_price IS '할인가';
 COMMENT ON COLUMN current_price_by_platform.url IS '게임 상세 페이지 URL';
 COMMENT ON COLUMN current_price_by_platform.created_at IS '데이터 생성 시각';
+COMMENT ON COLUMN current_price_by_platform.updated_at IS '데이터 업데이트 시각';
 
 -- 7. users
 -- DROP TABLE IF EXISTS users CASCADE;
@@ -126,7 +128,7 @@ CREATE TABLE users (
     discord_link VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,  -- NOT NULL 추가
     deleted_at TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL  -- NOT NULL 추가
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON COLUMN users.id IS '사용자 고유 식별자';
@@ -181,10 +183,10 @@ CREATE TABLE video (
     game_id BIGINT NOT NULL REFERENCES game_static(id) ON DELETE CASCADE,  -- INT에서 BIGINT로 변경, 삭제 전략 추가
     video_id VARCHAR(255) NOT NULL,
     title VARCHAR(255) NOT NULL,
-    thumbnail TEXT NOT NULL,
+    thumbnail VARCHAR(255) NOT NULL,
     views BIGINT NOT NULL,
     upload_date TIMESTAMP NOT NULL,
-    channel_profile_image TEXT NOT NULL,
+    channel_profile_image VARCHAR(255) NOT NULL,
     channel_name VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT now() NOT NULL,
     updated_at TIMESTAMP DEFAULT now() NOT NULL,  -- NOT NULL 추가
@@ -209,3 +211,31 @@ CREATE TRIGGER update_video_timestamp
 BEFORE UPDATE ON video
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
+
+-- 11. game_discord_channel
+-- DROP TABLE IF EXISTS game_discord_channel CASCADE;
+CREATE TABLE game_discord_channel (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    game_id BIGINT NOT NULL REFERENCES game_static(id) ON DELETE CASCADE,
+    url VARCHAR(255) NOT NULL,
+    expired_at DATE,
+    channel_name VARCHAR(255) NOT NULL,
+    channel_description VARCHAR(255),
+    member_count INT,
+    channel_icon VARCHAR(255),
+    created_at TIMESTAMP DEFAULT now() NOT NULL,
+    deleted_at TIMESTAMP
+);
+
+COMMENT ON COLUMN game_discord_channel.id IS '디스코드 채널 고유 식별자';
+COMMENT ON COLUMN game_discord_channel.user_id IS '등록한 사용자 ID';
+COMMENT ON COLUMN game_discord_channel.game_id IS '관련 게임 ID';
+COMMENT ON COLUMN game_discord_channel.url IS '디스코드 채널 URL';
+COMMENT ON COLUMN game_discord_channel.expired_at IS '채널 만료 시각';
+COMMENT ON COLUMN game_discord_channel.channel_name IS '디스코드 채널 이름';
+COMMENT ON COLUMN game_discord_channel.channel_description IS '채널 설명';
+COMMENT ON COLUMN game_discord_channel.member_count IS '채널 현재 인원 수';
+COMMENT ON COLUMN game_discord_channel.channel_icon IS '디스코드 채널 아이콘 이미지';
+COMMENT ON COLUMN game_discord_channel.created_at IS '등록 시각';
+COMMENT ON COLUMN game_discord_channel.deleted_at IS '삭제 시각 (소프트 딜리트용)';
