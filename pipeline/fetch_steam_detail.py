@@ -3,12 +3,11 @@ import time
 import html
 from datetime import datetime
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 
-from util.io_helper import save_csv
+from util.io_helper import save_csv, load_csv, upload_to_s3, download_from_s3
 from util.cache_manager import CacheManager
 from util.logger import setup_logger
 from util.rate_limit_manager import RateLimitManager
@@ -48,6 +47,18 @@ class SteamDetailFetcher:
         self.original_df_path = self.OUTPUT_DIR / "steam_game_detail_original.csv"
         self.parsed_df_path = self.OUTPUT_DIR / "steam_game_detail_parsed.csv"
         
+        # S3 업로드 설정
+        self.S3_CACHE_KEY = "data/cache/detail_status_cache.json"
+        self.S3_OUTPUT_ORIGINAL_KEY = "data/raw/steam_game_detail_original.csv"
+        self.S3_OUTPUT_PARSED_KEY = "data/raw/steam_game_detail_parsed.csv"
+        
+        if self.CACHE_FILE.exists():
+            self.logger.info("📁 로컬 캐시 사용")
+        elif download_from_s3(self.S3_CACHE_KEY, self.CACHE_FILE):
+            self.logger.info("✅ S3 캐시 다운로드 성공")
+        else:
+            self.logger.warning("❗ 캐시 파일 없음. 빈 캐시로 초기화됩니다.")
+
         # 헤더 설정
         self.HEADERS = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -94,14 +105,15 @@ class SteamDetailFetcher:
         """Steam API에서 상세 데이터 가져오기"""
         cached = self.cache.get(app_id)
         
+        # 캐시된 데이터가 성공적이고 48시간 이내에 수집된 경우
         if cached and cached.get("status") == "success" and \
-                not self.cache.is_stale(app_id, hours=24):
-            return
+                not self.cache.is_stale(app_id, hours=48):
+            return False
         
         # 블랙리스트 처리
         if self.cache.too_many_fails(app_id):
             self.logger.info(f"🚫 앱 {app_id}은 실패가 누적되어 건너뜁니다.")
-            return    
+            return False
         
         url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=korean"
         try:
@@ -113,7 +125,7 @@ class SteamDetailFetcher:
             if not app_data.get("success", False):
                 self.failed_list.append(app_id)
                 self.cache.record_fail(app_id)
-                return
+                return False
             
             data = app_data.get("data", {})
             if data.get("type") == "game":
@@ -125,9 +137,12 @@ class SteamDetailFetcher:
                     "status": "success",
                     "collected_at": datetime.now().isoformat()
                 })
+                return True
             else:
                 self.failed_list.append(app_id)
                 self.cache.record_fail(app_id)
+                self.logger.warning(f"[{app_id}] 게임이 아닙니다.")
+                return False
                 
         except Timeout:
             self.errored_list.append(app_id)
@@ -165,7 +180,7 @@ class SteamDetailFetcher:
             
             # 기존 CSV 로드 및 병합
             if self.original_df_path.exists():
-                old_original_df = pd.read_csv(self.original_df_path)
+                old_original_df = load_csv(self.original_df_path)
                 merged_original_df = pd.concat([old_original_df, new_original_df], ignore_index=True)
                 merged_original_df.drop_duplicates(subset="steam_appid", inplace=True)
             else:
@@ -175,16 +190,11 @@ class SteamDetailFetcher:
             new_parsed_df = pd.DataFrame(self.parsed_data)
             
             if self.parsed_df_path.exists():
-                old_parsed_df = pd.read_csv(self.parsed_df_path)
+                old_parsed_df = load_csv(self.parsed_df_path)
                 merged_parsed_df = pd.concat([old_parsed_df, new_parsed_df], ignore_index=True)
                 merged_parsed_df.drop_duplicates(subset="appid", inplace=True)
             else:
                 merged_parsed_df = new_parsed_df
-            
-            # # 상태 캐시의 중복 제거
-            # clean_status_cache = {}
-            # for key, value in self.status_cache.items():
-            #     clean_status_cache[key] = value
             
             # 저장
             save_csv(merged_original_df, self.original_df_path)
@@ -197,15 +207,12 @@ class SteamDetailFetcher:
             print(f"💾 중간 저장 완료 - 누적 수집: {len(merged_parsed_df)}개")
             print(f"진행 상황: {len(self.parsed_data)}개 성공 / {len(self.failed_list)}개 실패 / {len(self.errored_list)}개 오류 (성공률: {success_rate:.1f}%)")
             
-            # 저장 후 데이터 초기화 (메모리 관리)
-            # self.original_data = {}
-            # self.parsed_data = []
             
         except Exception as e:
             self.logger.error(f"체크포인트 저장 중 오류: {e}")
     
     def fetch_in_parallel(self, app_ids, batch_size=40):
-        """배치 단위로 병렬 처리"""
+        """배치 단위로 처리"""
         base_delay = 1
         
         for i in range(0, len(app_ids), batch_size):
@@ -217,23 +224,18 @@ class SteamDetailFetcher:
             if self.rate_limit_manager.should_slow_down():
                 self.logger.info(f"⚠️ 요청 제한 감지로 지연 시간 증가: {request_delay:.2f}초")
             
-            with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
-                # 요청 제출 시 약간의 지연 추가
-                futures = []
-                time.sleep(request_delay)  # 요청 간 1s 지연
-                for app_id in batch:
-                    futures.append(executor.submit(self.fetch_detail_data, app_id))
-                
-                for future in tqdm(as_completed(futures), total=len(batch), desc="📦 Fetching"):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        self.logger.error(f"스레드 실행 중 오류: {e}")
+            for app_id in tqdm(batch, desc="📦 Fetching"):
+                try:
+                    should_sleep = self.fetch_detail_data(app_id)
+                    if should_sleep:
+                        time.sleep(request_delay)
+                except Exception as e:
+                    self.logger.error(f"[{app_id}] 요청 중 오류: {e}")
             
             # 각 배치 후 저장
             self.save_checkpoint()
     
-    def retry_loop(self, target_list, label, max_retries=3):
+    def retry_loop(self, target_list, label, max_retries=2):
         """실패한 요청 재시도"""
         for i in range(max_retries):
             if not target_list:
@@ -253,7 +255,7 @@ class SteamDetailFetcher:
         collected_appids = set()
         if self.parsed_df_path.exists():
             try:
-                existing_df = pd.read_csv(self.parsed_df_path)
+                existing_df = load_csv(self.parsed_df_path)
                 collected_appids.update(existing_df["appid"].tolist())
             except Exception as e:
                 self.logger.warning(f"⚠️ 기존 CSV 로드 실패: {e}")
@@ -261,12 +263,9 @@ class SteamDetailFetcher:
     
     def run(self, input_csv_path):
         """전체 데이터 수집 프로세스 실행"""
-        # 이미 수집된 ID 확인
-        collected_appids = self.get_collected_appids()
-        
         # ID 목록 불러오기 및 필터링
-        ids_list = pd.read_csv(input_csv_path)["appid"].tolist()
-        ids_list = [appid for appid in ids_list if appid not in collected_appids]
+        ids_list = load_csv(input_csv_path)["appid"].tolist()
+        # ids_list = [appid for appid in ids_list if appid not in collected_appids]
         self.logger.info(f"📋 새로 수집할 appid 수: {len(ids_list)}")
         
         # 1차 수집
@@ -281,7 +280,7 @@ class SteamDetailFetcher:
 
         # 실패한 ID 파일에서 추가 실패 ID 가져오기
         if self.FAILED_IDS_FILE.exists():
-            failed_ids_from_file = pd.read_csv(self.FAILED_IDS_FILE)["appid"].tolist()
+            failed_ids_from_file = load_csv(self.FAILED_IDS_FILE)["appid"].tolist()
         else:
             failed_ids_from_file = []
         self.logger.info(f"파일에서 실패한 ID 수: {len(failed_ids_from_file)}")
@@ -319,9 +318,10 @@ class SteamDetailFetcher:
         
         if self.parsed_df_path.exists():
             # 수집 완료 후 정제
-            parsed_df = pd.read_csv(self.parsed_df_path)
-            common_ids = pd.read_csv(input_csv_path)["appid"].tolist()
+            parsed_df = load_csv(self.parsed_df_path)
+            common_ids = load_csv(input_csv_path)["appid"].tolist()
             filtered_df = parsed_df[parsed_df["appid"].isin(common_ids)]
+
             # 총 수집 결과 확인
             self.logger.info(f"🎯 총 수집된 게임 수: {len(filtered_df)}")
             save_csv(filtered_df, self.parsed_df_path)
@@ -336,3 +336,9 @@ class SteamDetailFetcher:
             })
             failed_df.to_csv(self.ERROR_DIR / "failed_detail_ids.csv", index=False)
             self.logger.info(f"❗ 실패한 ID 목록이 failed_detail_ids.csv에 저장되었습니다.")
+            
+        # S3에 업로드
+        upload_to_s3(self.parsed_df_path, self.S3_OUTPUT_PARSED_KEY)
+        upload_to_s3(self.original_df_path, self.S3_OUTPUT_ORIGINAL_KEY)
+        upload_to_s3(self.CACHE_FILE, self.S3_CACHE_KEY)
+        self.logger.info(f"✅ S3에 업로드 완료: {self.S3_OUTPUT_PARSED_KEY}, {self.S3_CACHE_KEY}")
