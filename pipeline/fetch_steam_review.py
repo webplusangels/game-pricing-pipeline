@@ -2,12 +2,12 @@ import requests
 import time
 from datetime import datetime
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 
-from util.io_helper import save_csv, load_csv
+from util.io_helper import save_csv, load_csv, upload_to_s3, download_from_s3
 from util.cache_manager import CacheManager
 from util.logger import setup_logger
 
@@ -42,6 +42,16 @@ class SteamReviewFetcher:
         self.FAILED_IDS_FILE = self.ERROR_DIR / "failed_review_ids.csv"
         self.reviews_df_path = self.OUTPUT_DIR / "steam_game_reviews.csv"
         
+        # S3 업로드 설정
+        self.S3_CACHE_KEY = "data/cache/review_status_cache.json"
+        self.S3_OUTPUT_KEY = "data/raw/steam_game_reviews.csv"
+        if self.CACHE_FILE.exists():
+            self.logger.info("📁 로컬 캐시 사용")
+        elif download_from_s3(self.S3_CACHE_KEY, self.CACHE_FILE):
+            self.logger.info("✅ S3 캐시 다운로드 성공")
+        else:
+            self.logger.warning("❗ 캐시 파일 없음. 빈 캐시로 초기화됩니다.")
+
         # 헤더 설정
         self.HEADERS = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -59,10 +69,11 @@ class SteamReviewFetcher:
         
         if cached and cached.get("status") == "success" and \
             not self.cache.is_stale(app_id, hours=24):
-            return
+            return False
+        
         if self.cache.too_many_fails(app_id):
             self.logger.info(f"🚫 앱 {app_id}은 실패가 누적되어 건너뜁니다.")
-            return
+            return False
         
         url = f"https://store.steampowered.com/appreviews/{app_id}?json=1&filter=all&language=all&day_range=all&review_type=all&purchase_type=all"
         
@@ -74,7 +85,7 @@ class SteamReviewFetcher:
             if response_json.get("success") != 1:
                 self.failed_list.append(app_id)
                 self.cache.record_fail(app_id)
-                return
+                return False
             
             query_summary = response_json.get("query_summary", {})
             if query_summary:
@@ -89,9 +100,12 @@ class SteamReviewFetcher:
                     "status": "success",
                     "collected_at": datetime.now().isoformat()
                 })
+                return True
             else:
                 self.failed_list.append(app_id)
                 self.cache.record_fail(app_id)
+                self.logger.warning(f"[{app_id}] 리뷰 데이터 없음")
+                return False
                 
         except Timeout:
             self.errored_list.append(app_id)
@@ -130,7 +144,7 @@ class SteamReviewFetcher:
             if self.reviews_df_path.exists():
                 old_reviews_df = load_csv(self.reviews_df_path)
                 merged_reviews_df = pd.concat([old_reviews_df, new_reviews_df], ignore_index=True)
-                merged_reviews_df.drop_duplicates(subset="appid", inplace=True)
+                merged_reviews_df.drop_duplicates(subset="appid", keep="last", inplace=True)
             else:
                 merged_reviews_df = new_reviews_df
 
@@ -152,6 +166,8 @@ class SteamReviewFetcher:
     
     def fetch_in_parallel(self, app_ids, batch_size=40):
         """배치 단위로 병렬 처리"""
+        base_delay = 0.8
+
         for i in range(0, len(app_ids), batch_size):
             batch = app_ids[i:i+batch_size]
             self.logger.info(f"배치 처리 중: {i+1}-{i+len(batch)}/{len(app_ids)}")
@@ -160,19 +176,20 @@ class SteamReviewFetcher:
                 # 요청 제출 시 약간의 지연 추가
                 futures = []
                 for app_id in batch:
-                    futures.append(executor.submit(self.fetch_review_data, app_id))
-                    time.sleep(0.8)  # 요청 간 800ms 지연
+                    futures.append((app_id, executor.submit(self.fetch_review_data, app_id)))
                 
-                for future in tqdm(as_completed(futures), total=len(batch), desc="📦 Fetching"):
+                for app_id, future in tqdm(futures, desc="📦 Fetching"):
                     try:
-                        future.result()
+                        should_sleep = future.result()
+                        if should_sleep:
+                            time.sleep(base_delay)
                     except Exception as e:
                         self.logger.error(f"스레드 실행 중 오류: {e}")
             
             # 각 배치 후 저장
             self.save_checkpoint()
     
-    def retry_loop(self, target_list, label, max_retries=3):
+    def retry_loop(self, target_list, label, max_retries=2):
         """실패한 요청 재시도"""
         for i in range(max_retries):
             if not target_list:
@@ -187,25 +204,32 @@ class SteamReviewFetcher:
             self.fetch_in_parallel(retry_targets, batch_size=20)
             time.sleep(2)  # 재시도 사이 더 긴 대기 시간
     
-    def get_collected_appids(self):
-        """이미 수집된 ID 목록 가져오기"""
-        collected_appids = set()
-        if self.reviews_df_path.exists():
-            try:
-                existing_df = pd.read_csv(self.reviews_df_path)
-                collected_appids.update(existing_df["appid"].tolist())
-            except Exception as e:
-                self.logger.warning(f"⚠️ 기존 CSV 로드 실패: {e}")
-        return collected_appids
+    # def get_collected_appids(self):
+    #     """이미 수집된 ID 목록 가져오기"""
+    #     collected_appids = set()
+    #     if self.reviews_df_path.exists():
+    #         try:
+    #             existing_df = load_csv(self.reviews_df_path)
+    #             collected_appids.update(existing_df["appid"].tolist())
+    #         except Exception as e:
+    #             self.logger.warning(f"⚠️ 기존 CSV 로드 실패: {e}")
+    #     return collected_appids
+    
+    # def init_app_list(self, ids_list):
+    #     """수집한 ID 목록 초기화"""
+    #     df = load_csv(self.reviews_df_path)
+    #     if not df.empty:
+    #         # ids_list에 없는 ID 제거
+    #         df = df[~df["appid"].isin(ids_list)]
+    #     save_csv(df, self.reviews_df_path)
+    #     return df["appid"].tolist()
     
     def run(self, input_csv_path):
         """전체 데이터 수집 프로세스 실행"""
-        # 이미 수집된 ID 확인
-        collected_appids = self.get_collected_appids()
-        
         # ID 목록 불러오기 및 필터링
-        ids_list = pd.read_csv(input_csv_path)["appid"].tolist()
-        ids_list = [appid for appid in ids_list if appid not in collected_appids]
+        ids_list = load_csv(input_csv_path)["appid"].tolist()
+        # ids_list = self.init_app_list(ids_list)
+        # ids_list = [appid for appid in ids_list if appid not in collected_appids]
         self.logger.info(f"📋 새로 수집할 appid 수: {len(ids_list)}")
         
         # 1차 수집
@@ -220,7 +244,7 @@ class SteamReviewFetcher:
 
         # 실패한 ID 파일에서 추가 실패 ID 가져오기
         if self.FAILED_IDS_FILE.exists():
-            failed_ids_from_file = pd.read_csv(self.FAILED_IDS_FILE)["id"].tolist()
+            failed_ids_from_file = load_csv(self.FAILED_IDS_FILE)["id"].tolist()
         else:
             failed_ids_from_file = []
         self.logger.info(f"파일에서 실패한 ID 수: {len(failed_ids_from_file)}")
@@ -258,7 +282,7 @@ class SteamReviewFetcher:
         
         # 총 수집 결과 확인
         if self.reviews_df_path.exists():
-            final_df = pd.read_csv(self.reviews_df_path)
+            final_df = load_csv(self.reviews_df_path)
             self.logger.info(f"🎯 총 수집된 게임 리뷰 수: {len(final_df)}")
         
         self.logger.info(f"❌ 최종 실패: {len(self.failed_list)}개, 에러: {len(self.errored_list)}개")
@@ -271,3 +295,8 @@ class SteamReviewFetcher:
             })
             save_csv(failed_df, self.FAILED_IDS_FILE)
             self.logger.info(f"❗ 실패한 ID 목록이 {self.FAILED_IDS_FILE}에 저장되었습니다.")
+            
+        # S3 업로드
+        upload_to_s3(self.CACHE_FILE, self.S3_CACHE_KEY, remove_after=False)
+        upload_to_s3(self.reviews_df_path, self.S3_OUTPUT_KEY, remove_after=False)
+        self.logger.info(f"✅ S3에 업로드 완료: {self.S3_OUTPUT_KEY}, {self.S3_CACHE_KEY}")
