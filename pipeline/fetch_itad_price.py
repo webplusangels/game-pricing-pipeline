@@ -1,14 +1,13 @@
 import requests
 import time
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 from datetime import datetime
 from config import settings
 
-from util.io_helper import load_json, save_json, save_csv
+from util.io_helper import save_csv, load_csv, upload_to_s3, download_from_s3
 from util.cache_manager import CacheManager
 from util.logger import setup_logger
 from util.rate_limit_manager import RateLimitManager
@@ -47,12 +46,22 @@ class ITADPriceFetcher:
         self.FAILED_IDS_FILE = self.ERROR_DIR / "itad_price_failed_ids.csv"
         self.INPUT_FILE = self.OUTPUT_DIR / "itad_game_ids.csv"
         self.OUTPUT_FILE = self.OUTPUT_DIR / "itad_game_prices.csv"
-        
+
         # API 설정
         self.PRICE_BASE_URL = "https://api.isthereanydeal.com/games/prices/v3"
         self.KEY = settings.ITAD_KEY
         self.COUNTRY = "KR"
-        
+                
+        # S3 업로드 설정
+        self.S3_CACHE_KEY = "data/cache/itad_price_status_cache.json"
+        self.S3_OUTPUT_KEY = "data/raw/itad_game_prices.csv"
+        if self.CACHE_FILE.exists():
+            self.logger.info("📁 로컬 캐시 사용")
+        elif download_from_s3(self.S3_CACHE_KEY, self.CACHE_FILE):
+            self.logger.info("✅ S3 캐시 다운로드 성공")
+        else:
+            self.logger.warning("❗ 캐시 파일 없음. 빈 캐시로 초기화됩니다.")
+
         # 헤더 설정
         self.HEADERS = {
             "Content-Type": "application/json",
@@ -64,32 +73,6 @@ class ITADPriceFetcher:
         self.failed_list = []
         self.errored_list = []
         self.cache = CacheManager(self.CACHE_FILE)
-        
-    # def _load_cache(self):
-    #     """캐시 파일에서 상태 정보 로드"""
-    #     try:
-    #         cache = load_json(self.CACHE_FILE)
-    #         if not isinstance(cache, dict):
-    #             self.logger.warning("⚠️ 캐시 파일이 비정상적입니다. 빈 캐시로 초기화합니다.")
-    #             return {}
-            
-    #         # 중복 키 제거 (마지막 값 유지)
-    #         deduplicated_cache = {}
-    #         for key, value in cache.items():
-    #             deduplicated_cache[key] = value
-            
-    #         # 로깅 추가: 중복 제거된 키의 수 확인
-    #         original_count = len(cache)
-    #         deduplicated_count = len(deduplicated_cache)
-            
-    #         if original_count != deduplicated_count:
-    #             self.logger.info(f"🔍 캐시에서 {original_count - deduplicated_count}개의 중복 키가 제거되었습니다.")
-            
-    #         return deduplicated_cache
-            
-    #     except Exception as e:
-    #         self.logger.warning(f"⚠️ 캐시 파일 로드 실패: {e}. 빈 캐시로 초기화합니다.")
-    #         return {}
     
     def load_game_ids(self):
         """게임 ID 파일에서 게임 ID 목록 로드"""
@@ -97,18 +80,18 @@ class ITADPriceFetcher:
             if not self.INPUT_FILE.exists():
                 raise FileNotFoundError(f"{self.INPUT_FILE} 파일이 존재하지 않습니다.")
 
-            df = pd.read_csv(self.INPUT_FILE)
+            df = load_csv(self.INPUT_FILE)
             if 'itad_id' not in df.columns:
                 raise ValueError("입력 CSV에 'itad_id' 컬럼이 존재하지 않습니다.")
 
             valid_ids = df.dropna(subset=['itad_id'])
 
-            # 이미 처리된 ID 제외
-            if self.OUTPUT_FILE.exists():
-                existing_df = pd.read_csv(self.OUTPUT_FILE)
-                if 'itad_id' in existing_df.columns:
-                    processed_ids = set(existing_df['itad_id'].tolist())
-                    valid_ids = valid_ids[~valid_ids['itad_id'].isin(processed_ids)]
+            # # 이미 처리된 ID 제외
+            # if self.OUTPUT_FILE.exists():
+            #     existing_df = pd.read_csv(self.OUTPUT_FILE)
+            #     if 'itad_id' in existing_df.columns:
+            #         processed_ids = set(existing_df['itad_id'].tolist())
+            #         valid_ids = valid_ids[~valid_ids['itad_id'].isin(processed_ids)]
 
             self.logger.info(f"총 {len(valid_ids)}개의 유효한 게임 ID를 로드했습니다.")
             return valid_ids
@@ -160,7 +143,7 @@ class ITADPriceFetcher:
             cached = self.cache.get(game_id)
 
             if cached and cached.get("status") == "success" and \
-            not self.cache.is_stale(game_id, hours=6):
+            not self.cache.is_stale(game_id, hours=3):
                 self.logger.info(f"[{game_id}] 이미 수집된 데이터, 건너뜀")
                 continue
 
@@ -240,7 +223,8 @@ class ITADPriceFetcher:
                 processed_data = self.process_price_data(data, game_ids_batch)
                 if processed_data:
                     self.fetched_data.extend(processed_data)
-                return
+                    return True
+                return False
                 
             except Timeout:
                 retry_count += 1
@@ -263,17 +247,18 @@ class ITADPriceFetcher:
                 else:
                     self.errored_list.extend(game_ids_batch)
                     self.logger.error(f"HTTP 오류 {status_code}: {e}")
-                    return
+                    return False
                     
             except Exception as e:
                 self.errored_list.extend(game_ids_batch)
                 self.logger.error(f"처리 중 오류 발생: {e}")
-                return
+                return False
 
         if retry_count >= max_retries:
             self.errored_list.extend(game_ids_batch)
             self.logger.error(f"최대 재시도 횟수 초과. 배치 처리 실패.")
-    
+            return False
+            
     def save_checkpoint(self):
         """현재 수집 상태를 저장"""
         try:
@@ -285,7 +270,7 @@ class ITADPriceFetcher:
             new_data_df = pd.DataFrame(self.fetched_data)
     
             if self.OUTPUT_FILE.exists():
-                old_data_df = pd.read_csv(self.OUTPUT_FILE)
+                old_data_df = load_csv(self.OUTPUT_FILE)
                 merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
                 if 'shop_id' in merged_df.columns:
                     merged_df.drop_duplicates(subset=['itad_id', 'shop_id'], keep='last', inplace=True)
@@ -313,12 +298,11 @@ class ITADPriceFetcher:
         
         with tqdm(total=len(batches), desc="🔍 배치 처리") as pbar:
             for i, batch in enumerate(batches):
-                with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
-                    future = executor.submit(self.fetch_batch, batch)
-                    future.result()
+                should_sleep = self.fetch_batch(batch)
                 self.save_checkpoint()
                 pbar.update(1)
-                if i < len(batches) - 1:
+                
+                if i < len(batches) - 1 and should_sleep:
                     time.sleep(2)
     
     def retry_failed_ids(self, batch_size=20, max_retry_rounds=2):
@@ -346,6 +330,15 @@ class ITADPriceFetcher:
             if not retry_ids:
                 self.logger.info("✅ 재시도 성공! 더 이상 실패한 ID가 없습니다.")
                 break
+            
+    def init_app_list(self, ids_list):
+        """수집한 ID 목록 초기화"""
+        df = load_csv(self.players_df_path)
+        if not df.empty:
+            # ids_list에 없는 ID 제거
+            df = df[~df["appid"].isin(ids_list)]
+        save_csv(df, self.players_df_path)
+        return len(df)
     
     def run(self, batch_size=40):
         """전체 데이터 수집 프로세스 실행"""
@@ -386,13 +379,18 @@ class ITADPriceFetcher:
                 
             # 최종 결과 출력
             if self.OUTPUT_FILE.exists():
-                final_df = pd.read_csv(self.OUTPUT_FILE)
+                final_df = load_csv(self.OUTPUT_FILE)
                 unique_games = final_df['itad_id'].nunique()
                 total_deals = len(final_df)
                 shops_count = final_df['shop_name'].value_counts().to_dict()
                 self.logger.info(f"\n📊 최종 결과:")
                 self.logger.info(f"총 {unique_games}개 게임, {total_deals}개 딜 정보 수집")
                 self.logger.info(f"상점별 분포: {shops_count}")
+                
+            # S3 업로드
+            upload_to_s3(self.OUTPUT_FILE, self.S3_OUTPUT_KEY)
+            upload_to_s3(self.CACHE_FILE, self.S3_CACHE_KEY)
+            self.logger.info(f"✅ S3에 업로드 완료: {self.S3_OUTPUT_KEY}, {self.S3_CACHE_KEY}")
 
         except Exception as e:
             self.logger.error(f"프로세스 실행 중 오류: {e}")

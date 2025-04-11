@@ -8,7 +8,7 @@ from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 
-from util.io_helper import save_csv
+from util.io_helper import save_csv, load_csv, upload_to_s3, download_from_s3
 from util.cache_manager import CacheManager
 from util.logger import setup_logger
 from config import settings
@@ -53,6 +53,26 @@ class SteamListFetcher:
         self.all_apps_path = self.OUTPUT_DIR / "all_app_list.csv"
         self.common_ids_path = self.OUTPUT_DIR / "common_ids.csv"
         
+        # S3 업로드 설정
+        self.S3_CACHE_STEAMCHART_KEY = "data/cache/steamcharts_status_cache.json"
+        self.S3_CACHE_ALL_APPS_KEY = "data/cache/all_apps_cache.json"
+        self.S3_OUTPUT_STEAMCHART_KEY = "data/raw/steamcharts_top_games.csv"
+        self.S3_OUTPUT_ALL_APPS_KEY = "data/raw/steam_game_list.csv"
+        downloaded_steamchart = download_from_s3(self.S3_CACHE_STEAMCHART_KEY, self.CACHE_FILE_STEAMCHART)
+        downloaded_all_apps = download_from_s3(self.S3_CACHE_ALL_APPS_KEY, self.CACHE_FILE_ALL_APPS)
+        if downloaded_steamchart:
+            self.logger.info("✅ S3 캐시 다운로드 성공")
+        elif self.CACHE_FILE_STEAMCHART.exists():
+            self.logger.info("📁 로컬 캐시 사용")
+        else:
+            self.logger.warning("❗ 캐시 파일 없음. 빈 캐시로 초기화됩니다.")
+        if downloaded_all_apps:
+            self.logger.info("✅ S3 캐시 다운로드 성공")
+        elif self.CACHE_FILE_ALL_APPS.exists():
+            self.logger.info("📁 로컬 캐시 사용")
+        else:
+            self.logger.warning("❗ 캐시 파일 없음. 빈 캐시로 초기화됩니다.")
+
         # 헤더 설정
         self.HEADERS = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -66,7 +86,7 @@ class SteamListFetcher:
     
     def scrape_steamcharts_page(self, page_number):
         """단일 SteamCharts 페이지 스크래핑"""
-        if self.cache_steamchart.get(page_number) and self.cache_steamchart.get(page_number).get("status") == "success" and not self.cache.is_stale(page_number, hours=24):
+        if self.cache_steamchart.get(page_number) and self.cache_steamchart.get(page_number).get("status") == "success" and not self.cache_steamchart.is_stale(page_number, hours=24):
             return
         
         base_url = "https://steamcharts.com/top/p.{}"
@@ -225,10 +245,10 @@ class SteamListFetcher:
         """SteamCharts와 전체 앱 리스트의 공통 ID 필터링"""
         try:
             # 파일 로드
-            steamcharts_df = pd.read_csv(self.steamcharts_path)
-            all_apps_df = pd.read_csv(self.all_apps_path)
+            steamcharts_df = load_csv(self.steamcharts_path)
+            all_apps_df = load_csv(self.all_apps_path)
             if self.common_ids_path.exists():
-                old_ids_df = pd.read_csv(self.common_ids_path)
+                old_ids_df = load_csv(self.common_ids_path)
             else:
                 old_ids_df = pd.DataFrame(columns=["appid", "name"])
                 
@@ -256,5 +276,12 @@ class SteamListFetcher:
             self.filter_common_ids()
 
             self.logger.info("✅ 모든 작업 완료")
+            
+            # S3 업로드
+            upload_to_s3(self.steamcharts_path, self.S3_OUTPUT_STEAMCHART_KEY)
+            upload_to_s3(self.all_apps_path, self.S3_OUTPUT_ALL_APPS_KEY)
+            upload_to_s3(self.CACHE_FILE_STEAMCHART, self.S3_CACHE_STEAMCHART_KEY)
+            upload_to_s3(self.CACHE_FILE_ALL_APPS, self.S3_CACHE_ALL_APPS_KEY)
+            self.logger.info(f"✅ S3에 업로드 완료: {self.S3_OUTPUT_STEAMCHART_KEY}, {self.S3_OUTPUT_ALL_APPS_KEY}, {self.S3_CACHE_STEAMCHART_KEY}, {self.S3_CACHE_ALL_APPS_KEY}")
         except Exception as e:
             self.logger.error(f"전체 프로세스 실행 중 오류: {e}")

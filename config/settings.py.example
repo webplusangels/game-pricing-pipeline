@@ -5,10 +5,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ENV = os.environ.get("ENV", os.getenv("env", "local"))
+
+# ENV=dev python main.py        # 개발용 DB로 연결
+# ENV=prod python main.py       # 운영용 DB로 연결
+
 # 기본값 설정 (예시)
 DEFAULT_STEAM_KEY = 'default_steam_key'
 DEFAULT_STEAM_TOKEN = 'default_webapi_token'
 DEFAULT_ITAD_KEY = 'default_itad_key'
+DEFAULT_S3_BUCKET = 'default_s3_bucket'
+DEFAULT_AWS_REGION = 'default_aws_region'
+DEFAULT_AWS_KEY_ID = 'default_aws_access_key_id'
+DEFAULT_AWS_SECRET = 'default_aws_secret_access_key'
 
 DEFAULT_DB_HOST = 'localhost'
 DEFAULT_DB_NAME = 'default_db_name'
@@ -25,16 +34,27 @@ DEFAULT_FREE_LIST_DIR = './data/raw/free_steam_list.csv'
 STEAM_KEY = os.getenv('steam_api_key', DEFAULT_STEAM_KEY)
 STEAM_TOKEN = os.getenv('webapi_token', DEFAULT_STEAM_TOKEN)
 ITAD_KEY = os.getenv('itad_key', DEFAULT_ITAD_KEY)
+S3_BUCKET = os.getenv('s3_bucket', DEFAULT_S3_BUCKET)
+AWS_REGION = os.getenv('aws_region', DEFAULT_AWS_REGION)
+AWS_ACCESS_KEY_ID = os.getenv('aws_access_key_id', DEFAULT_AWS_KEY_ID)
+AWS_SECRET_ACCESS_KEY = os.getenv('aws_secret_access_key', DEFAULT_AWS_SECRET)
+USE_S3_UPLOAD = True
 
-DB_HOST = os.getenv('db_host', DEFAULT_DB_HOST)
-DB_NAME = os.getenv('db_name', DEFAULT_DB_NAME)
-DB_USER = os.getenv('db_user', DEFAULT_DB_USER)
-DB_PASS = os.getenv('db_pass', DEFAULT_DB_PASS)
-DB_PORT = os.getenv('db_port', DEFAULT_DB_PORT)
+def get_db_config(env_prefix):
+    return {
+        "host": os.getenv(f"{env_prefix}_db_host", DEFAULT_DB_HOST),
+        "name": os.getenv(f"{env_prefix}_db_name", DEFAULT_DB_NAME),
+        "user": os.getenv(f"{env_prefix}_db_user", DEFAULT_DB_USER),
+        "pass": os.getenv(f"{env_prefix}_db_pass", DEFAULT_DB_PASS),
+        "port": os.getenv(f"{env_prefix}_db_port", DEFAULT_DB_PORT),
+    }
 
-DB_URL = f"postgresql://{DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+db_config = get_db_config(ENV)
+
+DB_URL = f"postgresql://{db_config['user']}:{db_config['pass']}@{db_config['host']}:{db_config['port']}/{db_config['name']}"
 
 # 디렉토리 설정
 LIST_DIR = os.getenv('list_dir', DEFAULT_LIST_DIR)
 PAID_LIST_DIR = os.getenv('paid_list_dir', DEFAULT_PAID_LIST_DIR)
 FREE_LIST_DIR = os.getenv('free_list_dir', DEFAULT_FREE_LIST_DIR)
+

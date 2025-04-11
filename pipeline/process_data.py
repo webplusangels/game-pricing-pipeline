@@ -4,10 +4,11 @@ import ast
 import os
 
 from util.io_helper import load_csv, save_csv
+from util.db_schema_helper import drop_null_required_fields
 from util.logger import setup_logger
 
 class DataProcessor:
-    def __init__(self):
+    def __init__(self, not_null_map=None):
         # 로그 설정
         LOG_DIR = Path('log/process_data')
         LOG_DIR.mkdir(exist_ok=True)
@@ -35,12 +36,118 @@ class DataProcessor:
             "game_dynamic": self.parse_game_dynamic,
             "game_static": self.parse_game_static,
         }
+        
+        self.index_columns_map = {
+            "category": ["id"],
+            "platform": ["id"],
+            "game_static": ["id"],
+            "game_dynamic": ["game_id"],
+            "game_category": ["id"],
+            "current_price_by_platform": ["game_id", "platform_id"]
+        }
+        
+        self.table_dtypes = {
+            "category": {
+                'id': int,
+                'category_name': str
+            },
+            "platform": {
+                'id': int,
+                'name': str
+            },
+            "game_static": {
+                'id': int,
+                'title': str,
+                'original_title': str,
+                'description': str,
+                'release_date': str,
+                'publisher': str,
+                'developer': str,
+                'thumbnail': str,
+                'price': int,
+                'is_singleplay': bool,
+                'is_multiplay': bool
+            },
+            "game_dynamic": {
+                'game_id': int,
+                'rating': int,
+                'active_players': int,
+                'lowest_platform': int,
+                'lowest_price': int,
+                'history_lowest_price': int,
+                'on_sale': bool,
+                'total_reviews': int
+            },
+            "game_category": {
+                'id': int,
+                'category_id': int,
+                'game_id': int
+            },
+            "current_price_by_platform": {
+                'game_id': int,
+                'platform_id': int,
+                'discount_rate': int,
+                'discount_price': int,
+                'url': str
+            }
+        }
+        
+        self.not_null_map = not_null_map
 
-    def difference(self, new_df, old_df):
-        diff_df = pd.merge(new_df, old_df, how="outer", indicator=True)
+    def apply_not_null_filter(self, df, table_name):
+        if self.not_null_map:
+            return drop_null_required_fields(table_name, df, self.not_null_map)
+        return df
 
-        only_new = diff_df[diff_df["_merge"] == "left_only"]  # 새로 생긴 행
-        only_old = diff_df[diff_df["_merge"] == "right_only"]  # 삭제된 행
+    def sort_by_index_columns(self, df, table_name):
+        sort_keys = self.index_columns_map.get(table_name)
+        
+        if sort_keys and all(col in df.columns for col in sort_keys):
+            return df.sort_values(by=sort_keys).reset_index(drop=True)
+        return df
+    
+    def difference(self, new_df, old_df, table_name):
+        new_df = self.sort_by_index_columns(new_df, table_name)
+        old_df = self.sort_by_index_columns(old_df, table_name)
+        
+        index_cols = self.index_columns_map.get(table_name)
+        merged = pd.merge(
+            new_df, old_df, on=index_cols, how="outer", suffixes=('_new', '_old'), indicator=True
+        )
+        
+        updated_rows = []
+        for _, row in merged.iterrows():
+            if row['_merge'] == 'both':
+                changed = any(
+                    row[f'{col}_new'] != row[f'{col}_old']
+                    for col in new_df.columns if col not in index_cols
+                )
+                if changed:
+                    updated_rows.append(pd.Series({
+                        col: row[col if col in index_cols else f"{col}_new"]
+                        for col in new_df.columns
+                    }))
+            elif row['_merge'] == 'left_only':
+                updated_rows.append(pd.Series({
+                    col: row[col if col in index_cols else f"{col}_new"]
+                    for col in new_df.columns
+                }))
+        
+        only_new = pd.DataFrame(updated_rows)
+        if not only_new.empty:
+            only_new.columns = new_df.columns
+        else:
+            only_new = pd.DataFrame(columns=new_df.columns)
+        
+        only_old = merged[merged['_merge'] == 'right_only']
+        restored_rows = []
+        for _, row in only_old.iterrows():
+            restored_rows.append(pd.Series({
+                col: row[col] if col in index_cols else row.get(f"{col}_old", None)
+                for col in old_df.columns
+            }))
+        only_old = pd.DataFrame(restored_rows)
+        
         return only_new, only_old
     
     def load_previous_if_exists(self, filename):
@@ -49,14 +156,14 @@ class DataProcessor:
             return load_csv(prev_path)
         return None
 
-    def save_if_changed(self, df, filename):
+    def save_if_changed(self, df, filename, table_name):
         prev_df = self.load_previous_if_exists(filename)
         processed_path = self.data_processed_dir / filename
         updated_path = self.data_processed_dir / filename.replace(".csv", "_updated.csv")
         removed_path = self.data_processed_dir / filename.replace(".csv", "_removed.csv")
 
         if prev_df is not None:
-            only_new, only_old = self.difference(df, prev_df)
+            only_new, only_old = self.difference(df, prev_df, table_name)
             if only_new.empty and only_old.empty:
                 self.logger.info(f"{filename} 변경 없음 → 저장 생략")
                 if processed_path.exists():
@@ -112,22 +219,12 @@ class DataProcessor:
             'publisher', 'developer', 'thumbnail', 'price',
             'is_singleplay', 'is_multiplay'
         ]]
-
-        static_df = static_df.astype({
-            'id': int,
-            'title': str,
-            'original_title': str,
-            'description': str,
-            'release_date': str,
-            'publisher': str,
-            'developer': str,
-            'thumbnail': str,
-            'price': int,
-            'is_singleplay': bool,
-            'is_multiplay': bool
-        })
-
-        self.save_if_changed(static_df, "game_static.csv")
+        
+        static_df = self.apply_not_null_filter(static_df, "game_static")
+        static_df = static_df.astype(self.table_dtypes['game_static'])
+        static_df = self.sort_by_index_columns(static_df, "game_static")
+        
+        self.save_if_changed(static_df, "game_static.csv", "game_static")
 
     def parse_game_dynamic(self):
         """동적 게임 정보 테이블"""
@@ -181,19 +278,15 @@ class DataProcessor:
             'lowest_platform', 'lowest_price',
             'history_lowest_price', 'on_sale', 'total_reviews'
         ]]
-
-        dynamic_df = dynamic_df.astype({
-            'game_id': int,
-            'rating': int,
-            'active_players': int,
-            'lowest_platform': int,
-            'lowest_price': int,
-            'history_lowest_price': int,
-            'on_sale': bool,
-            'total_reviews': int
-        })
         
-        self.save_if_changed(dynamic_df, "game_dynamic.csv")
+        dynamic_df = self.apply_not_null_filter(dynamic_df, "game_dynamic")
+        self.logger.info(f"🧪 'lowest_price' 결측치 수: {dynamic_df['lowest_price'].isna().sum()}")
+        if dynamic_df['lowest_price'].isna().any():
+            self.logger.info(f"예시 결측치 행:\n{dynamic_df[dynamic_df['lowest_price'].isna()].iloc[0].to_dict()}")
+        dynamic_df = dynamic_df.astype(self.table_dtypes['game_dynamic'])
+        dynamic_df = self.sort_by_index_columns(dynamic_df, "game_dynamic")
+        
+        self.save_if_changed(dynamic_df, "game_dynamic.csv", "game_dynamic")
 
     def parse_game_category(self):
         """게임 카테고리 테이블"""
@@ -228,13 +321,11 @@ class DataProcessor:
         game_category_df = pd.DataFrame(mapping_rows, columns=['category_id', 'game_id'])
         game_category_df.insert(0, 'id', range(1, len(game_category_df) + 1))  
         
-        game_category_df = game_category_df.astype({
-            'id': int,
-            'category_id': int,
-            'game_id': int,
-        })
-
-        self.save_if_changed(game_category_df, "game_category.csv")
+        game_category_df = self.apply_not_null_filter(game_category_df, "game_category")
+        game_category_df = game_category_df.astype(self.table_dtypes['game_category'])
+        game_category_df = self.sort_by_index_columns(game_category_df, "game_category")
+    
+        self.save_if_changed(game_category_df, "game_category.csv", "game_category")
                    
     def parse_current_price_by_platform(self):
         """플랫폼별 현재 가격 테이블"""
@@ -266,24 +357,19 @@ class DataProcessor:
         ]
         
         # 모든 게임이 shop_id가 61인 경우 추가
-        steam_games = self.detail_parsed_df[['appid', 'initial_price']].copy()
+        steam_games = self.detail_parsed_df[['appid', 'final_price', 'discount_percent']].copy()
         steam_games['platform_id'] = 61  # Steam의 shop_id
-        steam_games['discount_rate'] = 0  # 할인율 0%
         steam_games['url'] = steam_games['appid'].apply(lambda x: f'https://store.steampowered.com/app/{x}/')
-        steam_games = steam_games.rename(columns={'appid': 'game_id', 'initial_price': 'discount_price'})
+        steam_games = steam_games.rename(columns={'appid': 'game_id', 'final_price': 'discount_price', 'discount_percent': 'discount_rate'})
         current_price_df = pd.concat([current_price_df, steam_games], ignore_index=True)   
         
-        current_price_df = current_price_df.astype({
-            'game_id': int,
-            'platform_id': int,
-            'discount_rate': int,
-            'discount_price': int,
-            'url': str
-        })
-        
-        self.save_if_changed(current_price_df, "current_price_by_platform.csv")
-        save_csv(current_price_df, self.data_processed_dir / 'current_price_by_platform.csv')
+        current_price_df = self.apply_not_null_filter(current_price_df, "current_price_by_platform")
+        current_price_df = current_price_df.astype(self.table_dtypes['current_price_by_platform'])
+        current_price_df = self.sort_by_index_columns(current_price_df, "current_price_by_platform")
 
+        self.save_if_changed(current_price_df, "current_price_by_platform.csv", "current_price_by_platform")
+
+        save_csv(current_price_df, self.data_processed_dir / 'current_price_by_platform.csv', 'current_price_by_platform')
         
     def parse_category(self):
         """카테고리 테이블"""
@@ -295,12 +381,11 @@ class DataProcessor:
             'category_name': unique_category
         })
 
-        unique_category_df = unique_category_df.astype({
-            'id': int,
-            'category_name': str,
-        })
+        unique_category_df = self.apply_not_null_filter(unique_category_df, "category")
+        unique_category_df = unique_category_df.astype(self.table_dtypes['category'])
+        unique_category_df = self.sort_by_index_columns(unique_category_df, "category")
 
-        self.save_if_changed(unique_category_df, "category.csv")
+        self.save_if_changed(unique_category_df, "category.csv", "category")
         
     def parse_platform(self):
         """플랫폼 테이블"""
@@ -313,12 +398,11 @@ class DataProcessor:
             .rename(columns={"shop_id": "id", "shop_name": "name"})  # 열 이름 변경
         )
         
-        unique_platform_df = unique_platform_df.astype({
-            'id': int,
-            'name': str,
-        })
-
-        self.save_if_changed(unique_platform_df, "platform.csv")
+        unique_platform_df = self.apply_not_null_filter(unique_platform_df, "platform")
+        unique_platform_df = unique_platform_df.astype(self.table_dtypes['platform'])
+        unique_platform_df = self.sort_by_index_columns(unique_platform_df, "platform")
+        
+        self.save_if_changed(unique_platform_df, "platform.csv", "platform")
 
     def run(self):
         keep_filenames = set(f"{name}.csv" for name in self.table_parsers)
