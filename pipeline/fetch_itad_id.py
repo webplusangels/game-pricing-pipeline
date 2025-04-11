@@ -1,14 +1,14 @@
 import requests
 import time
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
 from datetime import datetime
 from config import settings
 
-from util.io_helper import save_csv, load_csv
+from util.io_helper import save_csv, load_csv, upload_to_s3, download_from_s3
 from util.cache_manager import CacheManager
 from util.logger import setup_logger
 from util.rate_limit_manager import RateLimitManager
@@ -38,19 +38,29 @@ class ITADIdFetcher:
             name="itad_id_fetcher", 
             log_dir=self.LOG_DIR,
         )
-        
+
         # 요청 제어기 설정
         self.rate_limit_manager = RateLimitManager()
         
         # 파일 경로 설정
         self.CACHE_FILE = self.CACHE_DIR / "itad_id_status_cache.json"
         self.FAILED_IDS_FILE = self.ERROR_DIR / "itad_failed_ids.csv"
-        self.data_df_path = self.OUTPUT_DIR / "itad_game_ids.csv"
+        self.OUTPUT_FILE = self.OUTPUT_DIR / "itad_game_ids.csv"
         
         # API 설정
         self.ID_BASE_URL = "https://api.isthereanydeal.com/games/lookup/v1"
         self.KEY = settings.ITAD_KEY
-        
+                
+        # S3 업로드 설정
+        self.S3_CACHE_KEY = "data/cache/itad_id_status_cache.json"
+        self.S3_OUTPUT_KEY = "data/raw/itad_game_ids.csv"
+        if self.CACHE_FILE.exists():
+            self.logger.info("📁 로컬 캐시 사용")
+        elif download_from_s3(self.S3_CACHE_KEY, self.CACHE_FILE):
+            self.logger.info("✅ S3 캐시 다운로드 성공")
+        else:
+            self.logger.warning("❗ 캐시 파일 없음. 빈 캐시로 초기화됩니다.")
+
         # 헤더 설정
         self.HEADERS = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -69,10 +79,10 @@ class ITADIdFetcher:
         cached = self.cache.get(app_id)
         
         if cached and cached.get("status") == "success":
-            return
+            return False
         if self.cache.too_many_fails(app_id):
             self.logger.info(f"🚫 앱 {app_id}은 실패가 누적되어 건너뜁니다.")
-            return
+            return False
             
         url = f"{self.ID_BASE_URL}?key={self.KEY}&appid={app_id}"
         
@@ -86,13 +96,13 @@ class ITADIdFetcher:
                 self.failed_list.append(app_id)
                 self.cache.record_fail(app_id)
                 self.logger.warning(f"[{app_id}] 빈 응답")
-                return
+                return False
                 
             if "found" not in data:
                 self.failed_list.append(app_id)
                 self.cache.record_fail(app_id)
                 self.logger.warning(f"[{app_id}] 'found' 키가 없음: {data}")
-                return
+                return False
                 
             # 데이터 처리
             if data["found"] == True and "game" in data and "id" in data["game"]:
@@ -109,6 +119,7 @@ class ITADIdFetcher:
                     "status": "success",
                 })
                 self.logger.info(f"[{app_id}] 성공적으로 ITAD ID 찾음: {itad_id}")
+                return True
             else:
                 # found가 False인 경우 또는 game/id 키가 없는 경우
                 processed_data = {
@@ -121,6 +132,7 @@ class ITADIdFetcher:
                 self.fetched_data.append(processed_data)
                 self.cache.record_fail(app_id)
                 self.logger.info(f"[{app_id}] 게임을 ITAD에서 찾을 수 없음")
+                return False
                 
         except Timeout:
             self.errored_list.append(app_id)
@@ -157,39 +169,30 @@ class ITADIdFetcher:
             new_data_df = pd.DataFrame(self.fetched_data)
             
             # 기존 CSV 로드 및 병합
-            if self.data_df_path.exists():
-                old_data_df = load_csv(self.data_df_path)
+            if self.OUTPUT_FILE.exists():
+                old_data_df = load_csv(self.OUTPUT_FILE)
                 merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
                 merged_df.drop_duplicates(subset="appid", inplace=True)
             else:
                 merged_df = new_data_df
             
             # 저장
-            save_csv(merged_df, self.data_df_path)
-            self.cache.save()
-            
-            # 진행 상황 출력
-            total = len(self.fetched_data) + len(self.failed_list) + len(self.errored_list)
-            success_rate = len(self.fetched_data) / total * 100 if total > 0 else 0
-            
-            # 총 수집된 데이터 수 확인
-            total_collected = 0
-            if self.data_df_path.exists():
-                total_collected = len(load_csv(self.data_df_path))
-                  
+            save_csv(merged_df, self.OUTPUT_FILE)
+            self.cache.save()       
+
             # 저장 후 데이터 초기화 (메모리 관리)
             self.fetched_data = []
             
         except Exception as e:
             self.logger.error(f"체크포인트 저장 중 오류: {e}")
     
-    def fetch_in_parallel(self, rows, batch_size=40):
+    def fetch_in_parallel(self, app_ids, batch_size=40):
         """배치 단위로 병렬 처리"""
         base_delay = 0.5
         
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i:i+batch_size]
-            self.logger.info(f"배치 처리 중: {i+1}-{i+len(batch)}/{len(rows)}")
+        for i in range(0, len(app_ids), batch_size):
+            batch = app_ids[i:i+batch_size]
+            self.logger.info(f"배치 처리 중: {i+1}-{i+len(batch)}/{len(app_ids)}")
             
             # 요청 제한 상황에 따라 지연 시간 조정
             request_delay = self.rate_limit_manager.get_current_delay(base_delay)
@@ -199,13 +202,14 @@ class ITADIdFetcher:
             with ThreadPoolExecutor(max_workers=self.THREAD_WORKERS) as executor:
                 # 요청 제출 시 약간의 지연 추가
                 futures = []
-                for row in batch:
-                    futures.append(executor.submit(self.fetch_game_info, row))
-                    time.sleep(request_delay)  # 요청 간 지연 (API 제한 방지)
-                
-                for future in tqdm(as_completed(futures), total=len(batch), desc="📦 Fetching"):
+                for app_id in batch:
+                    futures.append((app_id, executor.submit(self.fetch_game_info, app_id)))
+
+                for app_id, future in tqdm(futures, desc="📦 Fetching"):
                     try:
-                        future.result()
+                        should_sleep = future.result()
+                        if should_sleep:
+                            time.sleep(base_delay)
                     except Exception as e:
                         self.logger.error(f"스레드 실행 중 오류: {e}")
             
@@ -233,9 +237,9 @@ class ITADIdFetcher:
     def get_collected_appids(self):
         """이미 수집된 ID 목록 가져오기"""
         collected_appids = set()
-        if self.data_df_path.exists():
+        if self.OUTPUT_FILE.exists():
             try:
-                existing_df = load_csv(self.data_df_path)
+                existing_df = load_csv(self.OUTPUT_FILE)
                 collected_appids.update(existing_df["appid"].tolist())
             except Exception as e:
                 self.logger.warning(f"⚠️ 기존 CSV 로드 실패: {e}")
@@ -315,8 +319,8 @@ class ITADIdFetcher:
             self.logger.info("\n✅ 데이터 수집 완료")
             
             # 총 수집 결과 확인
-            if self.data_df_path.exists():
-                final_df = load_csv(self.data_df_path)
+            if self.OUTPUT_FILE.exists():
+                final_df = load_csv(self.OUTPUT_FILE)
                 found_count = final_df['itad_id'].notna().sum()
                 self.logger.info(f"🎯 총 수집된 게임 수: {len(final_df)}")
                 self.logger.info(f"🔍 ITAD에서 찾은 게임 수: {found_count} (전체 중 {found_count/len(final_df)*100:.1f}%)")
@@ -332,6 +336,11 @@ class ITADIdFetcher:
                 save_csv(failed_df, self.ERROR_DIR / "itad_failed_ids.csv")
                 self.logger.info(f"❗ 실패한 ID 목록이 itad_failed_ids.csv에 저장되었습니다.")
                 
+            # S3 업로드
+            upload_to_s3(self.OUTPUT_FILE, self.S3_OUTPUT_KEY)
+            upload_to_s3(self.CACHE_FILE, self.S3_CACHE_KEY)
+            self.logger.info(f"✅ S3에 업로드 완료: {self.S3_OUTPUT_KEY}, {self.S3_CACHE_KEY}")
+            
         except Exception as e:
             self.logger.error(f"프로세스 실행 중 오류: {e}")
 
