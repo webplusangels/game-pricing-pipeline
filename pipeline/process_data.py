@@ -4,10 +4,11 @@ import ast
 import os
 
 from util.io_helper import load_csv, save_csv
+from util.db_schema_helper import drop_null_required_fields
 from util.logger import setup_logger
 
 class DataProcessor:
-    def __init__(self):
+    def __init__(self, not_null_map=None):
         # 로그 설정
         LOG_DIR = Path('log/process_data')
         LOG_DIR.mkdir(exist_ok=True)
@@ -90,6 +91,13 @@ class DataProcessor:
                 'url': str
             }
         }
+        
+        self.not_null_map = not_null_map
+
+    def apply_not_null_filter(self, df, table_name):
+        if self.not_null_map:
+            return drop_null_required_fields(table_name, df, self.not_null_map)
+        return df
 
     def sort_by_index_columns(self, df, table_name):
         sort_keys = self.index_columns_map.get(table_name)
@@ -115,16 +123,30 @@ class DataProcessor:
                     for col in new_df.columns if col not in index_cols
                 )
                 if changed:
-                    updated_rows.append(row[[f'{col}_new' for col in new_df.columns]])
+                    updated_rows.append(pd.Series({
+                        col: row[col if col in index_cols else f"{col}_new"]
+                        for col in new_df.columns
+                    }))
             elif row['_merge'] == 'left_only':
-                updated_rows.append(row[[f'{col}_new' for col in new_df.columns]])
+                updated_rows.append(pd.Series({
+                    col: row[col if col in index_cols else f"{col}_new"]
+                    for col in new_df.columns
+                }))
         
         only_new = pd.DataFrame(updated_rows)
-        only_new.columns = new_df.columns
+        if not only_new.empty:
+            only_new.columns = new_df.columns
+        else:
+            only_new = pd.DataFrame(columns=new_df.columns)
         
         only_old = merged[merged['_merge'] == 'right_only']
-        only_old = only_old[[f'{col}_old' for col in old_df.columns]]
-        only_old.columns = old_df.columns
+        restored_rows = []
+        for _, row in only_old.iterrows():
+            restored_rows.append(pd.Series({
+                col: row[col] if col in index_cols else row.get(f"{col}_old", None)
+                for col in old_df.columns
+            }))
+        only_old = pd.DataFrame(restored_rows)
         
         return only_new, only_old
     
@@ -197,10 +219,11 @@ class DataProcessor:
             'publisher', 'developer', 'thumbnail', 'price',
             'is_singleplay', 'is_multiplay'
         ]]
-
+        
+        static_df = self.apply_not_null_filter(static_df, "game_static")
         static_df = static_df.astype(self.table_dtypes['game_static'])
         static_df = self.sort_by_index_columns(static_df, "game_static")
-
+        
         self.save_if_changed(static_df, "game_static.csv", "game_static")
 
     def parse_game_dynamic(self):
@@ -255,7 +278,11 @@ class DataProcessor:
             'lowest_platform', 'lowest_price',
             'history_lowest_price', 'on_sale', 'total_reviews'
         ]]
-
+        
+        dynamic_df = self.apply_not_null_filter(dynamic_df, "game_dynamic")
+        self.logger.info(f"🧪 'lowest_price' 결측치 수: {dynamic_df['lowest_price'].isna().sum()}")
+        if dynamic_df['lowest_price'].isna().any():
+            self.logger.info(f"예시 결측치 행:\n{dynamic_df[dynamic_df['lowest_price'].isna()].iloc[0].to_dict()}")
         dynamic_df = dynamic_df.astype(self.table_dtypes['game_dynamic'])
         dynamic_df = self.sort_by_index_columns(dynamic_df, "game_dynamic")
         
@@ -294,9 +321,10 @@ class DataProcessor:
         game_category_df = pd.DataFrame(mapping_rows, columns=['category_id', 'game_id'])
         game_category_df.insert(0, 'id', range(1, len(game_category_df) + 1))  
         
+        game_category_df = self.apply_not_null_filter(game_category_df, "game_category")
         game_category_df = game_category_df.astype(self.table_dtypes['game_category'])
         game_category_df = self.sort_by_index_columns(game_category_df, "game_category")
-
+    
         self.save_if_changed(game_category_df, "game_category.csv", "game_category")
                    
     def parse_current_price_by_platform(self):
@@ -335,11 +363,12 @@ class DataProcessor:
         steam_games = steam_games.rename(columns={'appid': 'game_id', 'final_price': 'discount_price', 'discount_percent': 'discount_rate'})
         current_price_df = pd.concat([current_price_df, steam_games], ignore_index=True)   
         
+        current_price_df = self.apply_not_null_filter(current_price_df, "current_price_by_platform")
         current_price_df = current_price_df.astype(self.table_dtypes['current_price_by_platform'])
-        
-        self.save_if_changed(current_price_df, "current_price_by_platform.csv")
         current_price_df = self.sort_by_index_columns(current_price_df, "current_price_by_platform")
-        
+
+        self.save_if_changed(current_price_df, "current_price_by_platform.csv", "current_price_by_platform")
+
         save_csv(current_price_df, self.data_processed_dir / 'current_price_by_platform.csv', 'current_price_by_platform')
         
     def parse_category(self):
@@ -352,6 +381,7 @@ class DataProcessor:
             'category_name': unique_category
         })
 
+        unique_category_df = self.apply_not_null_filter(unique_category_df, "category")
         unique_category_df = unique_category_df.astype(self.table_dtypes['category'])
         unique_category_df = self.sort_by_index_columns(unique_category_df, "category")
 
@@ -368,9 +398,10 @@ class DataProcessor:
             .rename(columns={"shop_id": "id", "shop_name": "name"})  # 열 이름 변경
         )
         
+        unique_platform_df = self.apply_not_null_filter(unique_platform_df, "platform")
         unique_platform_df = unique_platform_df.astype(self.table_dtypes['platform'])
         unique_platform_df = self.sort_by_index_columns(unique_platform_df, "platform")
-
+        
         self.save_if_changed(unique_platform_df, "platform.csv", "platform")
 
     def run(self):
