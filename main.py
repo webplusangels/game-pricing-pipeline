@@ -35,6 +35,10 @@ def main():
     engine = create_engine(db_url)
     not_null_map = fetch_not_null_columns(engine)
     
+    # 디렉토리 생성
+    os.makedirs("data", exist_ok=True)
+    os.makedirs("log", exist_ok=True)
+    
     @contextmanager
     def log_step(name, logger):
         start = time()
