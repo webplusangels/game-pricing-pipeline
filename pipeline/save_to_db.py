@@ -32,28 +32,30 @@ class DBUploader:
         
         try:
             with self.engine.begin() as conn:
-                for file_path in self.data_dir.glob("*_removed.csv"):
-                    table = file_path.stem.replace("_removed", "")
+                delete_order = ["game_dynamic", "game_category", "game_static", "category", "platform", "current_price_by_platform"]
+                for table in delete_order:
+                    file_path = self.data_dir / f"{table}_removed.csv"
+                    if not file_path.exists():
+                        continue
                     df = load_csv(file_path)
                     if dry_run:
                         self.logger.info(f"[Dry Run] {table}에서 {len(df)}개 행이 삭제될 예정입니다.")
                         continue
-                    
-                    # self.delete_rows(table, df)
                     self.delete_rows(table, df, conn)
                     self.logger.info(f"🗑️ {table}에서 {len(df)}개 행 삭제 완료")
                     if file_path.exists():
                         os.remove(file_path)
                         
-                for file_path in self.data_dir.glob("*_updated.csv"):
-                    table = file_path.stem.replace("_updated", "")
+                upload_order = ["category", "platform", "game_static", "game_category", "game_dynamic", "current_price_by_platform"]
+                for table in upload_order:
+                    file_path = self.data_dir / f"{table}_updated.csv"
+                    if not file_path.exists():
+                        continue
                     df = load_csv(file_path)
-
+ 
                     if dry_run:
                         self.logger.info(f"[Dry Run] {table}에 {len(df)}개 행이 업로드(또는 수정)될 예정입니다.")
                         continue
-                    
-                    # self.insert_or_update_data(table, df, file_path, index_columns)
                     self.insert_or_update_data(table, df, file_path, index_columns_map[table], conn)
                     self.logger.info(f"✅ {table}에 {len(df)}개 행 업로드(또는 수정) 완료")
                 
