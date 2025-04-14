@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from util.io_helper import load_json, save_json
 
@@ -13,7 +13,7 @@ class CacheManager:
 
     def set(self, key, value):
         if isinstance(value, dict):
-            value.setdefault("collected_at", datetime.now().isoformat())
+            value.setdefault("collected_at", datetime.now(timezone.utc).isoformat())
         self.cache[str(key)] = value
         
     def items(self):
@@ -31,9 +31,10 @@ class CacheManager:
             return True
         try:
             collected_time = datetime.fromisoformat(entry["collected_at"])
-            # print(f"collected_time + hours: {collected_time + timedelta(hours=hours)}")
-            # print(f"datetime.now() - collected_time: {datetime.now() - collected_time}")
-            return (datetime.now() - collected_time) > timedelta(hours=hours)
+            if collected_time.tzinfo is None:
+                collected_time = collected_time.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            return (now - collected_time) > timedelta(hours=hours)
         except Exception as e:
             print(f"⚠️ collected_at 파싱 실패: {entry.get('collected_at')} / error: {e}")
             return True
@@ -48,7 +49,7 @@ class CacheManager:
         self.cache[str(key)] = {
             "status": "failed",
             "fail_count": fail_count,
-            "collected_at": datetime.now().isoformat()
+            "collected_at": datetime.now(timezone.utc).isoformat()
             }
 
     def too_many_fails(self, key, max_attempts=3):
