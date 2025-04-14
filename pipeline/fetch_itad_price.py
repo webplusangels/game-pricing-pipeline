@@ -143,7 +143,7 @@ class ITADPriceFetcher:
             cached = self.cache.get(game_id)
 
             if cached and cached.get("status") == "success" and \
-            not self.cache.is_stale(game_id, hours=3):
+                    not self.cache.is_stale(game_id, hours=3):
                 self.logger.info(f"[{game_id}] 이미 수집된 데이터, 건너뜀")
                 continue
 
@@ -207,6 +207,39 @@ class ITADPriceFetcher:
     def fetch_batch(self, game_ids_batch):
         """배치 단위 게임 가격 정보 수집"""
         retry_count = 0
+        # 캐시 기반 필터링
+        filtered_batch = [
+            app_id for app_id in game_ids_batch
+            if not (
+                self.cache.get(app_id) and 
+                self.cache.get(app_id).get("status") == "success" and 
+                not self.cache.is_stale(app_id, hours=3)
+            )
+            and not self.cache.too_many_fails(app_id)
+        ]
+        
+        excluded_due_to_cache = [
+            app_id for app_id in game_ids_batch
+            if (
+                self.cache.get(app_id) and 
+                self.cache.get(app_id).get("status") == "success" and 
+                not self.cache.is_stale(app_id, hours=3)
+            )
+        ]
+        
+        excluded_due_to_fail = [
+            app_id for app_id in game_ids_batch
+            if self.cache.too_many_fails(app_id)
+        ]
+        
+        self.logger.info(f"🧪 캐시로 제외된 ID: {excluded_due_to_cache[:5]}... (총 {len(excluded_due_to_cache)}개)")
+        self.logger.info(f"🧪 실패 누적으로 제외된 ID: {excluded_due_to_fail[:5]}... (총 {len(excluded_due_to_fail)}개)")
+        
+        if not filtered_batch:
+            self.logger.info("모든 게임 ID가 캐시되어 있어 건너뜀")
+            return False
+        
+        game_ids_batch = filtered_batch
         max_retries = self.MAX_RETRIES
 
         while retry_count < max_retries:
