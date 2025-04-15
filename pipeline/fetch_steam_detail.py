@@ -3,6 +3,7 @@ import time
 import html
 from datetime import datetime
 import pandas as pd
+import boto3
 from tqdm import tqdm
 from pathlib import Path
 from requests.exceptions import HTTPError, Timeout, ConnectionError
@@ -77,13 +78,40 @@ class SteamDetailFetcher:
         """
         if pd.isna(text):
             return text
-        return html.unescape(text.replace('\uFEFF', ''))    
+        return html.unescape(text.replace('\uFEFF', ''))   
+    
+    def upload_image_to_s3(self, image_url, app_id):
+        """
+        이미지를 S3에 업로드하고 URL 반환
+        """
+        
+        bucket_name = "steam-image-store"
+        key = f'images/{app_id}.jpg'
+        s3_url = f"https://{bucket_name}.s3.ap-northeast-2.amazonaws.com/images/{key}"
+        
+        try:
+            image_data = requests.get(image_url, timeout=10).content
+            s3 = boto3.client('s3')
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=key,
+                Body=image_data,
+                ContentType='image/jpeg',
+                ACL='public-read'
+            )
+            return s3_url
+        except Exception as e:
+            self.logger.error(f"이미지 업로드 중 오류 발생: {app_id} / {e}")
+            return None
         
     def parse_game_data(self, data):
         """API 응답에서 필요한 게임 정보 추출"""
         if not isinstance(data, dict) or not data.get("steam_appid"):
             self.logger.warning(f"유효하지 않은 게임 데이터 형식")
             return None
+        
+        header_image_url = data.get("header_image")
+        uploaded_image_url = self.upload_image_to_s3(header_image_url, data["steam_appid"]) if header_image_url else None
             
         return {
             "appid": data.get("steam_appid"),
@@ -91,7 +119,7 @@ class SteamDetailFetcher:
             "short_description": self.clean_html_entities(data.get("short_description")),
             "is_free": data.get("is_free", False),
             "release_date": data.get("release_date", {}).get("date", "정보 없음"),            
-            "header_image": data.get("header_image"),
+            "header_image": uploaded_image_url,
             "developer": data.get("developers", [None])[0],
             "publisher": data.get("publishers", [None])[0],
             "initial_price": int(data.get("price_overview", {}).get("initial", 0) / 100),
