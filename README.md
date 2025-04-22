@@ -234,18 +234,31 @@ cp .env.example .env
 
 ### 3. 환경변수 설명
 
-steam_api_key: Steam API 요청용 키
-webapi_token: Steam Web API 사용 토큰
-itad_key: ITAD API 요청용 키
-s3_bucket	(선택): S3에 파일 업로드 시 사용할 버킷 이름
-aws_region: AWS 리전 정보 (예: ap-northeast-2)
-aws_access_key_id: AWS Access Key
-aws_secret_access_key: AWS Secret Access Key
-local_db_host: 로컬 환경 DB 서버 주소
-dev_db_host: 개발 환경 DB 서버 주소
-prod_db_host: 운영 환경 DB 서버 주소
-list_dir: 전체 게임 리스트 파일 경로
-paid_list_dir: 유료 게임 리스트 파일 경로
-free_list_dir: 무료 게임 리스트 파일 경로
-env: 기본 환경 설정 (local, dev, prod)
+`steam_api_key`: Steam API 요청용 키
+
+`webapi_token`: Steam Web API 사용 토큰
+
+`itad_key`: ITAD API 요청용 키
+
+`s3_bucket`	(선택): S3에 파일 업로드 시 사용할 버킷 이름
+
+`aws_region`: AWS 리전 정보 (예: ap-northeast-2)
+
+`aws_access_key_id`: AWS Access Key
+
+`aws_secret_access_key`: AWS Secret Access Key
+
+`local_db_host`: 로컬 환경 DB 서버 주소
+
+`dev_db_host`: 개발 환경 DB 서버 주소
+
+`prod_db_host`: 운영 환경 DB 서버 주소
+
+`list_dir`: 전체 게임 리스트 파일 경로
+
+`paid_list_dir`: 유료 게임 리스트 파일 경로
+
+`free_list_dir`: 무료 게임 리스트 파일 경로
+
+`env`: 기본 환경 설정 (local, dev, prod)
 
