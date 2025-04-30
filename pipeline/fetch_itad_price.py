@@ -297,29 +297,67 @@ class ITADPriceFetcher:
         try:
             if not self.fetched_data:
                 self.logger.info("저장할 새 데이터가 없습니다.")
+                self.cache.save()
                 return
             
             # 새 데이터를 DataFrame으로 변환
             new_data_df = pd.DataFrame(self.fetched_data)
-    
-            if self.OUTPUT_FILE.exists():
-                old_data_df = load_csv(self.OUTPUT_FILE)
-                merged_df = pd.concat([old_data_df, new_data_df], ignore_index=True)
-                if 'shop_id' in merged_df.columns:
-                    merged_df.drop_duplicates(subset=['itad_id', 'shop_id'], keep='last', inplace=True)
-                else:
-                    merged_df.drop_duplicates(subset=['itad_id'], keep='last', inplace=True)
+            if new_data_df.empty:
+                self.logger.info("새로 가져온 데이터가 비어 있습니다. 캐시만 저장합니다.")
+                self.cache.save()
+                self.fetched_data = [] # Clear fetched data even if empty
+                return
+            
+            processed_itad_ids = new_data_df['itad_id'].dropna().unique()
+            if len(processed_itad_ids) == 0:
+                 self.logger.info("처리된 유효한 itad_id가 새 데이터에 없습니다. 캐시만 저장합니다.")
+                 self.cache.save()
+                 self.fetched_data = [] # Clear fetched data
+                 return
+
+            self.logger.info(f"이번 실행에서 처리된 고유 게임 ID 수: {len(processed_itad_ids)}")
+
+            old_data_df = load_csv(str(self.OUTPUT_FILE))
+
+            if not isinstance(old_data_df, pd.DataFrame):
+                old_data_df = pd.DataFrame()
+            
+            if not old_data_df.empty and 'itad_id' in old_data_df.columns:
+                 # Ensure IDs are comparable (e.g., convert both to string)
+                 old_data_df['itad_id_str'] = old_data_df['itad_id'].astype(str)
+                 processed_itad_ids_str = [str(id_val) for id_val in processed_itad_ids]
+
+                 mask = old_data_df['itad_id_str'].isin(processed_itad_ids_str)
+                 unaffected_data_df = old_data_df[~mask].copy()
+                 # Drop the temporary string column
+                 unaffected_data_df.drop(columns=['itad_id_str'], inplace=True, errors='ignore')
+                 old_data_df.drop(columns=['itad_id_str'], inplace=True, errors='ignore') # Drop from original too if needed elsewhere
+                 self.logger.info(f"기존 데이터 {len(old_data_df)} 행 중 {len(unaffected_data_df)} 행 유지 (처리된 ID 제외).")
             else:
-                merged_df = new_data_df
-    
-            # 저장
-            save_csv(merged_df, self.OUTPUT_FILE)
+                 self.logger.info("기존 데이터가 없거나 'itad_id' 컬럼이 없어 필터링을 건너뜁니다.")
+                 unaffected_data_df = pd.DataFrame() # Start fresh if old data is unusable or empty
+
+            new_data_df['itad_id'] = new_data_df['itad_id'].astype(str)
+            
+            if not unaffected_data_df.empty:
+                unaffected_data_df['itad_id'] = unaffected_data_df['itad_id'].astype(str)
+
+            all_cols = new_data_df.columns.union(unaffected_data_df.columns)
+            unaffected_data_df = unaffected_data_df.reindex(columns=all_cols)
+            new_data_df = new_data_df.reindex(columns=all_cols)
+
+            final_df = pd.concat([unaffected_data_df, new_data_df], ignore_index=True)
+            self.logger.info(f"병합 후 최종 데이터 프레임 크기: {final_df.shape}")
+            
+            save_csv(final_df, str(self.OUTPUT_FILE))
             self.cache.save()
-    
-            # 정보 출력
-            total_processed = len(set([d['itad_id'] for d in self.fetched_data]))
-            self.logger.info(f"체크포인트 저장 완료. 총 {total_processed}개 게임, {len(self.fetched_data)}개 딜 정보 저장")
-    
+            
+            total_processed_in_run = len(processed_itad_ids)
+            deals_added_in_run = len(new_data_df) # Represents newly fetched deals for processed IDs
+            total_rows_in_final_csv = len(final_df)
+            self.logger.info(f"체크포인트 저장 완료. 이번 실행에서 {total_processed_in_run}개 게임 처리, {deals_added_in_run}개 최신 딜 정보 반영.")
+            self.logger.info(f"최종 저장된 CSV 파일 행 수: {total_rows_in_final_csv}")
+            
             self.fetched_data = []
 
         except Exception as e:
