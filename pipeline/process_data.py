@@ -363,6 +363,12 @@ class DataProcessor:
         steam_games = steam_games.rename(columns={'appid': 'game_id', 'final_price': 'discount_price', 'discount_percent': 'discount_rate'})
         current_price_df = pd.concat([current_price_df, steam_games], ignore_index=True)   
         
+        original_count = len(current_price_df)
+        current_price_df = current_price_df.drop_duplicates(subset=['game_id', 'platform_id'], keep='last')
+        deduplicated_count = len(current_price_df)
+        if original_count > deduplicated_count:
+            self.logger.info(f"✨ current_price_by_platform: Deduplicated {original_count - deduplicated_count} rows based on ['game_id', 'platform_id']")
+        
         current_price_df = self.apply_not_null_filter(current_price_df, "current_price_by_platform")
         current_price_df = current_price_df.astype(self.table_dtypes['current_price_by_platform'])
         current_price_df = self.sort_by_index_columns(current_price_df, "current_price_by_platform")
