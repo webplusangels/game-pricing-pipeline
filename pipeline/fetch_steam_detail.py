@@ -97,7 +97,6 @@ class SteamDetailFetcher:
                 Key=key,
                 Body=image_data,
                 ContentType='image/jpeg',
-                ACL='public-read'
             )
             return s3_url
         except Exception as e:
