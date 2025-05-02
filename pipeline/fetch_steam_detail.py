@@ -209,7 +209,7 @@ class SteamDetailFetcher:
             if self.original_df_path.exists():
                 old_original_df = load_csv(self.original_df_path)
                 merged_original_df = pd.concat([old_original_df, new_original_df], ignore_index=True)
-                merged_original_df.drop_duplicates(subset="steam_appid", inplace=True)
+                merged_original_df.drop_duplicates(subset="steam_appid", keep='last', inplace=True)
             else:
                 merged_original_df = new_original_df
                 
@@ -219,7 +219,7 @@ class SteamDetailFetcher:
             if self.parsed_df_path.exists():
                 old_parsed_df = load_csv(self.parsed_df_path)
                 merged_parsed_df = pd.concat([old_parsed_df, new_parsed_df], ignore_index=True)
-                merged_parsed_df.drop_duplicates(subset="appid", inplace=True)
+                merged_parsed_df.drop_duplicates(subset="appid", keep='last', inplace=True)
             else:
                 merged_parsed_df = new_parsed_df
             
