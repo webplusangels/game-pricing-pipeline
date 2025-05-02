@@ -133,9 +133,9 @@ class SteamDetailFetcher:
         """Steam API에서 상세 데이터 가져오기"""
         cached = self.cache.get(app_id)
         
-        # 캐시된 데이터가 성공적이고 48시간 이내에 수집된 경우
+        # 캐시된 데이터가 성공적이고 24시간 이내에 수집된 경우
         if cached and cached.get("status") == "success" and \
-                not self.cache.is_stale(app_id, hours=48):
+                not self.cache.is_stale(app_id, hours=24):
             return False
         
         # 블랙리스트 처리
